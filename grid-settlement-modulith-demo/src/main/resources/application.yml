@@ -1,0 +1,10 @@
+spring:
+  application:
+    name: grid-settlement-modulith-demo
+  threads:
+    virtual:
+      enabled: true
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
