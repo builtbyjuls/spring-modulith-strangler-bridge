@@ -1,5 +1,6 @@
 package com.builtbyjuls.strangler.slice;
 
+import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -9,9 +10,15 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.MutablePropertyValues;
+import org.springframework.beans.PropertyValue;
+import org.springframework.beans.factory.FactoryBean;
 import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.config.ConstructorArgumentValues;
+import org.springframework.beans.factory.config.RuntimeBeanReference;
+import org.springframework.beans.factory.config.TypedStringValue;
 import org.springframework.beans.factory.support.AbstractBeanDefinition;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.beans.factory.support.BeanDefinitionRegistryPostProcessor;
@@ -145,6 +152,15 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
                 for (String alias : registry.getAliases(beanName)) {
                     registry.removeAlias(alias);
                 }
+                if (bd.getPropertyValues() != null && bd.getPropertyValues().contains("repositoryFragments")) {
+                    PropertyValue fragmentsPv = bd.getPropertyValues().getPropertyValue("repositoryFragments");
+                    if (fragmentsPv != null && fragmentsPv.getValue() instanceof RuntimeBeanReference rbr) {
+                        if (registry.containsBeanDefinition(rbr.getBeanName())) {
+                            log.info("Pruned repository fragments bean '{}'", rbr.getBeanName());
+                            registry.removeBeanDefinition(rbr.getBeanName());
+                        }
+                    }
+                }
                 registry.removeBeanDefinition(beanName);
             }
         }
@@ -259,9 +275,61 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
                 classes.add(resolved.getName());
             }
         }
+        Object factoryBeanObjectType = bd.getAttribute(FactoryBean.OBJECT_TYPE_ATTRIBUTE);
+        addCandidateValue(factoryBeanObjectType, classes);
+
+        Object repoConfig = bd.getAttribute("org.springframework.data.repository.config.RepositoryConfiguration");
+        if (repoConfig != null) {
+            try {
+                Method getRepoInterface = repoConfig.getClass().getMethod("getRepositoryInterface");
+                Object repoIfce = getRepoInterface.invoke(repoConfig);
+                addCandidateValue(repoIfce, classes);
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (bd.hasConstructorArgumentValues()) {
+            for (ConstructorArgumentValues.ValueHolder vh : bd.getConstructorArgumentValues().getGenericArgumentValues()) {
+                addCandidateValue(vh.getValue(), classes);
+            }
+            for (ConstructorArgumentValues.ValueHolder vh : bd.getConstructorArgumentValues().getIndexedArgumentValues().values()) {
+                addCandidateValue(vh.getValue(), classes);
+            }
+        }
+
+        if (bd.getPropertyValues() != null) {
+            Object repoInterface = null;
+            if (bd.getPropertyValues() instanceof MutablePropertyValues mpv) {
+                repoInterface = mpv.get("repositoryInterface");
+            } else if (bd.getPropertyValues().contains("repositoryInterface")) {
+                PropertyValue pv = bd.getPropertyValues().getPropertyValue("repositoryInterface");
+                repoInterface = (pv != null) ? pv.getValue() : null;
+            }
+            addCandidateValue(repoInterface, classes);
+        }
         if (bd.getOriginatingBeanDefinition() != null) {
             classes.addAll(extractCandidateClasses(bd.getOriginatingBeanDefinition()));
         }
         return classes;
+    }
+
+    private void addCandidateValue(Object value, Set<String> classes) {
+        if (value == null) {
+            return;
+        }
+        if (value instanceof Class<?> clazz) {
+            classes.add(clazz.getName());
+        } else if (value instanceof ResolvableType rt) {
+            Class<?> resolved = rt.resolve();
+            if (resolved != null) {
+                classes.add(resolved.getName());
+            }
+        } else if (value instanceof String s && StringUtils.hasText(s)) {
+            classes.add(s);
+        } else if (value instanceof TypedStringValue tsv && StringUtils.hasText(tsv.getValue())) {
+            classes.add(tsv.getValue());
+        } else if (StringUtils.hasText(value.toString())) {
+            classes.add(value.toString());
+        }
     }
 }

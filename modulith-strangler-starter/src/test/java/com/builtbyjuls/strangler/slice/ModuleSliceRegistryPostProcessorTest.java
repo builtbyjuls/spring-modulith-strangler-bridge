@@ -4,6 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.RootBeanDefinition;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Configuration;
@@ -165,6 +169,76 @@ class ModuleSliceRegistryPostProcessorTest {
             assertThat(context).hasSingleBean(ModulithBridgeProperties.class);
             assertThat(context).hasSingleBean(ModuleLayoutInspector.class);
         });
+    }
+
+    @Test
+    @DisplayName("Should prune FactoryBean bean definition when factoryBeanObjectType is in non-hosted module")
+    void shouldPruneFactoryBeanWhenObjectTypeIsInNonHostedModule() {
+        RootBeanDefinition factoryBeanBd = new RootBeanDefinition(DummyRepositoryFactoryBean.class);
+        factoryBeanBd.setAttribute(
+                FactoryBean.OBJECT_TYPE_ATTRIBUTE,
+                ContractInternalBean.class
+        );
+
+        contextRunner
+                .withPropertyValues(
+                        "modulith.bridge.base-package=com.builtbyjuls.grid",
+                        "modulith.bridge.host-only=metering"
+                )
+                .withInitializer(context -> ((BeanDefinitionRegistry) context).registerBeanDefinition("contractRepo", factoryBeanBd))
+                .run(context -> {
+                    assertThat(context).doesNotHaveBean("contractRepo");
+                });
+    }
+
+    @Test
+    @DisplayName("Should prune FactoryBean bean definition when repositoryInterface property is in non-hosted module")
+    void shouldPruneFactoryBeanWhenRepositoryInterfaceIsInNonHostedModule() {
+        RootBeanDefinition factoryBeanBd = new RootBeanDefinition(DummyRepositoryFactoryBean.class);
+        factoryBeanBd.getPropertyValues().add(
+                "repositoryInterface",
+                "com.builtbyjuls.grid.contract.internal.ContractInternalRepository"
+        );
+
+        contextRunner
+                .withPropertyValues(
+                        "modulith.bridge.base-package=com.builtbyjuls.grid",
+                        "modulith.bridge.host-only=metering"
+                )
+                .withInitializer(context -> ((BeanDefinitionRegistry) context).registerBeanDefinition("contractRepoByProperty", factoryBeanBd))
+                .run(context -> {
+                    assertThat(context).doesNotHaveBean("contractRepoByProperty");
+                });
+    }
+
+    @Test
+    @DisplayName("Should prune bean definition when factoryBeanObjectType is String class name in non-hosted module")
+    void shouldPruneWhenFactoryBeanObjectTypeIsString() {
+        DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
+        RootBeanDefinition factoryBeanBd = new RootBeanDefinition();
+        factoryBeanBd.setBeanClassName("org.springframework.data.jpa.repository.support.JpaRepositoryFactoryBean");
+        factoryBeanBd.setAttribute(
+                FactoryBean.OBJECT_TYPE_ATTRIBUTE,
+                "com.builtbyjuls.grid.contract.internal.ContractInternalRepository"
+        );
+        beanFactory.registerBeanDefinition("contractRepoString", factoryBeanBd);
+
+        ModuleSliceRegistryPostProcessor processor = new ModuleSliceRegistryPostProcessor("com.builtbyjuls.grid", "metering");
+        processor.postProcessBeanDefinitionRegistry(beanFactory);
+
+        assertThat(beanFactory.containsBeanDefinition("contractRepoString")).isFalse();
+    }
+
+    static class DummyRepositoryFactoryBean implements FactoryBean<Object> {
+        @Override
+        public Object getObject() {
+            return new Object();
+        }
+
+        @Override
+        public Class<?> getObjectType() {
+            return Object.class;
+        }
     }
 
     @Configuration(proxyBeanMethods = false)
