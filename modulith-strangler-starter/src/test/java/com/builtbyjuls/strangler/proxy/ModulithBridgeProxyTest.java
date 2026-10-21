@@ -18,6 +18,9 @@ import org.springframework.web.client.RestClient;
 
 import com.builtbyjuls.strangler.config.BridgeMode;
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
+import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
+import com.builtbyjuls.strangler.parity.ShadowParityResult;
+import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.slice.ModuleSliceRegistryPostProcessor;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
@@ -38,6 +41,8 @@ class ModulithBridgeProxyTest {
     private RestClient.Builder restClientBuilder;
     private MockRestServiceServer mockServer;
     private BridgeHttpClient httpClient;
+    private ShadowParityVerifier verifier;
+    private ShadowParityRegistry registry;
 
     @NamedInterface("TestMeteringApi")
     public interface TestMeteringApi {
@@ -67,6 +72,8 @@ class ModulithBridgeProxyTest {
         this.restClientBuilder = RestClient.builder();
         this.mockServer = MockRestServiceServer.bindTo(restClientBuilder).build();
         this.httpClient = new BridgeHttpClient(restClientBuilder, objectMapper);
+        this.verifier = new ShadowParityVerifier(objectMapper);
+        this.registry = new ShadowParityRegistry();
     }
 
     @Test
@@ -387,6 +394,216 @@ class ModulithBridgeProxyTest {
         } finally {
             latch.countDown();
         }
+    }
+
+    @Test
+    @DisplayName("SHADOW mode returns local result, dispatches remote on virtual thread, and records matched result")
+    void shouldRecordMatchedParityInShadowMode() {
+        properties.setShadowAwait(true);
+        ModulithBridgeProperties.ModuleRouteConfig route = new ModulithBridgeProperties.ModuleRouteConfig();
+        route.setMode(BridgeMode.SHADOW);
+        route.setUrl("http://remote-worker:8080");
+        properties.getModules().put("metering", route);
+
+        String remoteResponseJson = """
+                {
+                    "result": ["LOCAL_VOLUME_2026-10-22"],
+                    "durationMs": 12,
+                    "moduleName": "metering",
+                    "error": null
+                }
+                """;
+
+        mockServer.expect(requestTo("http://remote-worker:8080/internal/modulith-bridge/invoke"))
+                .andRespond(withSuccess(remoteResponseJson, org.springframework.http.MediaType.APPLICATION_JSON));
+
+        LocalMeteringService localService = new LocalMeteringService();
+        ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
+                localService,
+                "metering",
+                TestMeteringApi.class,
+                properties,
+                httpClient,
+                objectMapper,
+                verifier,
+                registry
+        );
+
+        TestMeteringApi proxy = (TestMeteringApi) Proxy.newProxyInstance(
+                TestMeteringApi.class.getClassLoader(),
+                new Class<?>[]{TestMeteringApi.class},
+                handler
+        );
+
+        List<String> result = proxy.getVolumes(LocalDate.of(2026, 10, 22));
+
+        assertThat(result).containsExactly("LOCAL_VOLUME_2026-10-22");
+        assertThat(localService.localCalls).isEqualTo(1);
+        mockServer.verify();
+
+        assertThat(registry.getTotalCount()).isEqualTo(1);
+        assertThat(registry.getMatchCount()).isEqualTo(1);
+        assertThat(registry.getFallbackCount()).isEqualTo(0);
+        assertThat(registry.getMismatches()).isEmpty();
+
+        ShadowParityResult recorded = registry.getResults().get(0);
+        assertThat(recorded.moduleName()).isEqualTo("metering");
+        assertThat(recorded.interfaceName()).isEqualTo(TestMeteringApi.class.getName());
+        assertThat(recorded.methodName()).isEqualTo("getVolumes");
+        assertThat(recorded.matched()).isTrue();
+        assertThat(recorded.diffSummary()).isNull();
+        assertThat(recorded.remoteError()).isNull();
+        assertThat(recorded.fallbackTriggered()).isFalse();
+    }
+
+    @Test
+    @DisplayName("SHADOW mode records mismatch in registry without throwing when remote returns drifted data")
+    void shouldRecordMismatchInShadowModeWhenRemoteDrifts() {
+        properties.setShadowAwait(true);
+        ModulithBridgeProperties.ModuleRouteConfig route = new ModulithBridgeProperties.ModuleRouteConfig();
+        route.setMode(BridgeMode.SHADOW);
+        route.setUrl("http://remote-worker:8080");
+        properties.getModules().put("metering", route);
+
+        String remoteResponseJson = """
+                {
+                    "result": ["DRIFTED_VOLUME_2026-10-22"],
+                    "durationMs": 15,
+                    "moduleName": "metering",
+                    "error": null
+                }
+                """;
+
+        mockServer.expect(requestTo("http://remote-worker:8080/internal/modulith-bridge/invoke"))
+                .andRespond(withSuccess(remoteResponseJson, org.springframework.http.MediaType.APPLICATION_JSON));
+
+        LocalMeteringService localService = new LocalMeteringService();
+        ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
+                localService,
+                "metering",
+                TestMeteringApi.class,
+                properties,
+                httpClient,
+                objectMapper,
+                verifier,
+                registry
+        );
+
+        TestMeteringApi proxy = (TestMeteringApi) Proxy.newProxyInstance(
+                TestMeteringApi.class.getClassLoader(),
+                new Class<?>[]{TestMeteringApi.class},
+                handler
+        );
+
+        List<String> result = proxy.getVolumes(LocalDate.of(2026, 10, 22));
+
+        // Caller still receives authoritative local result
+        assertThat(result).containsExactly("LOCAL_VOLUME_2026-10-22");
+        assertThat(localService.localCalls).isEqualTo(1);
+        mockServer.verify();
+
+        assertThat(registry.getTotalCount()).isEqualTo(1);
+        assertThat(registry.getMatchCount()).isEqualTo(0);
+        assertThat(registry.getMismatches()).hasSize(1);
+        assertThat(registry.getFallbackCount()).isEqualTo(0);
+
+        ShadowParityResult recorded = registry.getMismatches().get(0);
+        assertThat(recorded.matched()).isFalse();
+        assertThat(recorded.diffSummary()).contains("$[0]: local=LOCAL_VOLUME_2026-10-22 vs remote=DRIFTED_VOLUME_2026-10-22");
+        assertThat(recorded.remoteError()).isNull();
+        assertThat(recorded.fallbackTriggered()).isFalse();
+    }
+
+    @Test
+    @DisplayName("SHADOW mode records remoteError in registry and returns local result when remote call fails")
+    void shouldRecordRemoteErrorInShadowModeAndReturnLocalResult() {
+        properties.setShadowAwait(true);
+        ModulithBridgeProperties.ModuleRouteConfig route = new ModulithBridgeProperties.ModuleRouteConfig();
+        route.setMode(BridgeMode.SHADOW);
+        route.setUrl("http://remote-worker:8080");
+        properties.getModules().put("metering", route);
+
+        mockServer.expect(requestTo("http://remote-worker:8080/internal/modulith-bridge/invoke"))
+                .andRespond(withServerError());
+
+        LocalMeteringService localService = new LocalMeteringService();
+        ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
+                localService,
+                "metering",
+                TestMeteringApi.class,
+                properties,
+                httpClient,
+                objectMapper,
+                verifier,
+                registry
+        );
+
+        TestMeteringApi proxy = (TestMeteringApi) Proxy.newProxyInstance(
+                TestMeteringApi.class.getClassLoader(),
+                new Class<?>[]{TestMeteringApi.class},
+                handler
+        );
+
+        List<String> result = proxy.getVolumes(LocalDate.of(2026, 10, 22));
+
+        assertThat(result).containsExactly("LOCAL_VOLUME_2026-10-22");
+        assertThat(localService.localCalls).isEqualTo(1);
+        mockServer.verify();
+
+        assertThat(registry.getTotalCount()).isEqualTo(1);
+        assertThat(registry.getMatchCount()).isEqualTo(0);
+        assertThat(registry.getFallbackCount()).isEqualTo(1);
+
+        ShadowParityResult recorded = registry.getResults().get(0);
+        assertThat(recorded.matched()).isFalse();
+        assertThat(recorded.fallbackTriggered()).isTrue();
+        assertThat(recorded.remoteError()).contains("500 Internal Server Error");
+        assertThat(recorded.diffSummary()).contains("500 Internal Server Error");
+    }
+
+    @Test
+    @DisplayName("REMOTE mode with fallbackToLocal=true records fallbackTriggered=true in registry on failure")
+    void shouldRecordFallbackTriggeredInRemoteModeOnFailure() {
+        ModulithBridgeProperties.ModuleRouteConfig route = new ModulithBridgeProperties.ModuleRouteConfig();
+        route.setMode(BridgeMode.REMOTE);
+        route.setUrl("http://remote-worker:8080");
+        route.setFallbackToLocal(true);
+        properties.getModules().put("metering", route);
+
+        mockServer.expect(requestTo("http://remote-worker:8080/internal/modulith-bridge/invoke"))
+                .andRespond(withServerError());
+
+        LocalMeteringService localService = new LocalMeteringService();
+        ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
+                localService,
+                "metering",
+                TestMeteringApi.class,
+                properties,
+                httpClient,
+                objectMapper,
+                verifier,
+                registry
+        );
+
+        TestMeteringApi proxy = (TestMeteringApi) Proxy.newProxyInstance(
+                TestMeteringApi.class.getClassLoader(),
+                new Class<?>[]{TestMeteringApi.class},
+                handler
+        );
+
+        List<String> result = proxy.getVolumes(LocalDate.of(2026, 10, 22));
+
+        assertThat(result).containsExactly("LOCAL_VOLUME_2026-10-22");
+        assertThat(localService.localCalls).isEqualTo(1);
+        mockServer.verify();
+
+        assertThat(registry.getTotalCount()).isEqualTo(1);
+        assertThat(registry.getFallbackCount()).isEqualTo(1);
+
+        ShadowParityResult recorded = registry.getResults().get(0);
+        assertThat(recorded.matched()).isFalse();
+        assertThat(recorded.fallbackTriggered()).isTrue();
+        assertThat(recorded.remoteError()).contains("500 Internal Server Error");
     }
 
     @Configuration

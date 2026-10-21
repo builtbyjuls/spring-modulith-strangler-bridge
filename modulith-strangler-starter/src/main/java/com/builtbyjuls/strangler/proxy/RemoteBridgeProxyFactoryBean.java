@@ -9,6 +9,8 @@ import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.beans.factory.FactoryBean;
 
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
+import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
+import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -65,13 +67,23 @@ public class RemoteBridgeProxyFactoryBean<T> implements FactoryBean<T>, BeanFact
                     ? beanFactory.getBeanProvider(ObjectMapper.class).getIfAvailable()
                     : null;
 
+            ShadowParityVerifier verifier = beanFactory != null
+                    ? beanFactory.getBeanProvider(ShadowParityVerifier.class).getIfAvailable()
+                    : null;
+
+            ShadowParityRegistry registry = beanFactory != null
+                    ? beanFactory.getBeanProvider(ShadowParityRegistry.class).getIfAvailable()
+                    : null;
+
             ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
                     null, // local target is null because bean was pruned
                     moduleName,
                     interfaceType,
                     properties,
                     httpClient,
-                    objectMapper
+                    objectMapper,
+                    verifier,
+                    registry
             );
 
             ClassLoader classLoader = interfaceType.getClassLoader() != null

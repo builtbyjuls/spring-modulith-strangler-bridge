@@ -12,6 +12,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Role;
 import org.springframework.web.client.RestClient;
 
+import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
+import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeBeanPostProcessor;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.slice.ModuleSliceRegistryPostProcessor;
@@ -66,19 +68,36 @@ public class ModulithBridgeAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean
+    public ShadowParityVerifier shadowParityVerifier(ObjectProvider<ObjectMapper> objectMapperProvider) {
+        ObjectMapper mapper = objectMapperProvider.getIfAvailable();
+        return new ShadowParityVerifier(mapper);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ShadowParityRegistry shadowParityRegistry() {
+        return new ShadowParityRegistry();
+    }
+
+    @Bean
     @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
     @ConditionalOnMissingBean
     public static ModulithBridgeBeanPostProcessor modulithBridgeBeanPostProcessor(
             ObjectProvider<ModuleLayoutInspector> moduleLayoutInspectorProvider,
             ObjectProvider<ModulithBridgeProperties> propertiesProvider,
             ObjectProvider<BridgeHttpClient> bridgeHttpClientProvider,
-            ObjectProvider<ObjectMapper> objectMapperProvider
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            ObjectProvider<ShadowParityVerifier> shadowParityVerifierProvider,
+            ObjectProvider<ShadowParityRegistry> shadowParityRegistryProvider
     ) {
         return new ModulithBridgeBeanPostProcessor(
                 moduleLayoutInspectorProvider,
                 propertiesProvider,
                 bridgeHttpClientProvider,
-                objectMapperProvider
+                objectMapperProvider,
+                shadowParityVerifierProvider,
+                shadowParityRegistryProvider
         );
     }
 }

@@ -17,6 +17,8 @@ import org.springframework.util.ClassUtils;
 import org.springframework.util.StringUtils;
 
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
+import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
+import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +35,8 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
     private final ObjectProvider<ModulithBridgeProperties> propertiesProvider;
     private final ObjectProvider<BridgeHttpClient> httpClientProvider;
     private final ObjectProvider<ObjectMapper> objectMapperProvider;
+    private final ObjectProvider<ShadowParityVerifier> verifierProvider;
+    private final ObjectProvider<ShadowParityRegistry> registryProvider;
 
     private ApplicationContext applicationContext;
     private String resolvedBasePackage;
@@ -44,10 +48,23 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
             ObjectProvider<BridgeHttpClient> httpClientProvider,
             ObjectProvider<ObjectMapper> objectMapperProvider
     ) {
+        this(inspectorProvider, propertiesProvider, httpClientProvider, objectMapperProvider, null, null);
+    }
+
+    public ModulithBridgeBeanPostProcessor(
+            ObjectProvider<ModuleLayoutInspector> inspectorProvider,
+            ObjectProvider<ModulithBridgeProperties> propertiesProvider,
+            ObjectProvider<BridgeHttpClient> httpClientProvider,
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            ObjectProvider<ShadowParityVerifier> verifierProvider,
+            ObjectProvider<ShadowParityRegistry> registryProvider
+    ) {
         this.inspectorProvider = inspectorProvider;
         this.propertiesProvider = propertiesProvider;
         this.httpClientProvider = httpClientProvider;
         this.objectMapperProvider = objectMapperProvider;
+        this.verifierProvider = verifierProvider;
+        this.registryProvider = registryProvider;
     }
 
     public ModulithBridgeBeanPostProcessor(
@@ -56,10 +73,32 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
             BridgeHttpClient httpClient,
             ObjectMapper objectMapper
     ) {
-        this.inspectorProvider = new SingleObjectProvider<>(inspector);
-        this.propertiesProvider = new SingleObjectProvider<>(properties);
-        this.httpClientProvider = new SingleObjectProvider<>(httpClient);
-        this.objectMapperProvider = new SingleObjectProvider<>(objectMapper);
+        this(
+                new SingleObjectProvider<>(inspector),
+                new SingleObjectProvider<>(properties),
+                new SingleObjectProvider<>(httpClient),
+                new SingleObjectProvider<>(objectMapper),
+                null,
+                null
+        );
+    }
+
+    public ModulithBridgeBeanPostProcessor(
+            ModuleLayoutInspector inspector,
+            ModulithBridgeProperties properties,
+            BridgeHttpClient httpClient,
+            ObjectMapper objectMapper,
+            ShadowParityVerifier verifier,
+            ShadowParityRegistry registry
+    ) {
+        this(
+                new SingleObjectProvider<>(inspector),
+                new SingleObjectProvider<>(properties),
+                new SingleObjectProvider<>(httpClient),
+                new SingleObjectProvider<>(objectMapper),
+                new SingleObjectProvider<>(verifier),
+                new SingleObjectProvider<>(registry)
+        );
     }
 
     @Override
@@ -81,7 +120,9 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
         if (bean instanceof ModuleLayoutInspector
                 || bean instanceof ModulithBridgeProperties
                 || bean instanceof BridgeHttpClient
-                || bean instanceof ObjectMapper) {
+                || bean instanceof ObjectMapper
+                || bean instanceof ShadowParityVerifier
+                || bean instanceof ShadowParityRegistry) {
             return bean;
         }
 
@@ -117,6 +158,8 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
 
         BridgeHttpClient httpClient = httpClientProvider != null ? httpClientProvider.getIfAvailable() : null;
         ObjectMapper objectMapper = objectMapperProvider != null ? objectMapperProvider.getIfAvailable() : null;
+        ShadowParityVerifier verifier = verifierProvider != null ? verifierProvider.getIfAvailable() : null;
+        ShadowParityRegistry registry = registryProvider != null ? registryProvider.getIfAvailable() : null;
 
         ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
                 bean,
@@ -124,7 +167,9 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
                 apiInterface,
                 getProperties(),
                 httpClient,
-                objectMapper
+                objectMapper,
+                verifier,
+                registry
         );
 
         Class<?>[] allInterfaces = ClassUtils.getAllInterfacesForClass(bean.getClass());
