@@ -1,0 +1,284 @@
+package com.builtbyjuls.strangler.transport;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.Type;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationContext;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
+import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
+import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
+import com.fasterxml.jackson.databind.JavaType;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
+/**
+ * Inbound HTTP controller for Spring Modulith Strangler Bridge.
+ * Receives remote RPC invocations, resolves the local module bean, deserializes
+ * arguments against target method signatures, invokes the bean, and returns the response.
+ */
+@RestController
+@RequestMapping("/internal/modulith-bridge")
+public class ModulithBridgeInboundController {
+
+    private static final Logger log = LoggerFactory.getLogger(ModulithBridgeInboundController.class);
+
+    private final ApplicationContext applicationContext;
+    private final ModuleLayoutInspector inspector;
+    private final ModulithBridgeProperties properties;
+    private final ObjectMapper objectMapper;
+
+    public ModulithBridgeInboundController(
+            ApplicationContext applicationContext,
+            ModuleLayoutInspector inspector,
+            ModulithBridgeProperties properties,
+            ObjectMapper objectMapper
+    ) {
+        this.applicationContext = Objects.requireNonNull(applicationContext, "applicationContext must not be null");
+        this.inspector = inspector != null ? inspector : new ModuleLayoutInspector();
+        this.properties = properties != null ? properties : new ModulithBridgeProperties();
+        this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper().registerModule(new JavaTimeModule());
+    }
+
+    @PostMapping(
+            value = "/invoke",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public ResponseEntity<String> invokeHttp(@RequestBody String rawRequestBody) {
+        BridgeInvocationRequest request;
+        try {
+            request = objectMapper.readValue(rawRequestBody, BridgeInvocationRequest.class);
+        } catch (Exception ex) {
+            String err = "Malformed request payload: " + ex.getMessage();
+            log.error(err);
+            try {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(objectMapper.writeValueAsString(BridgeInvocationResponse.error(err, 0, "unknown")));
+            } catch (Exception ignored) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+            }
+        }
+
+        ResponseEntity<BridgeInvocationResponse> responseEntity = invoke(request);
+        try {
+            String json = objectMapper.writeValueAsString(responseEntity.getBody());
+            return ResponseEntity.status(responseEntity.getStatusCode())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(json);
+        } catch (Exception ex) {
+            log.error("Failed to serialize BridgeInvocationResponse: {}", ex.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    public ResponseEntity<BridgeInvocationResponse> invoke(BridgeInvocationRequest request) {
+        Objects.requireNonNull(request, "request must not be null");
+
+        log.debug("Received inbound bridge invocation for module '{}', interface '{}', method '{}'",
+                request.moduleName(), request.interfaceName(), request.methodName());
+
+        Class<?> targetInterface = resolveInterface(request.interfaceName());
+        if (targetInterface == null) {
+            String err = "Cannot resolve interface: " + request.interfaceName();
+            log.error(err);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(BridgeInvocationResponse.error(err, 0, request.moduleName()));
+        }
+
+        Object targetBean = resolveTargetBean(targetInterface, request.moduleName());
+        if (targetBean == null) {
+            String err = "No bean found implementing interface '" + targetInterface.getName()
+                    + "' for module '" + request.moduleName() + "'";
+            log.error(err);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(BridgeInvocationResponse.error(err, 0, request.moduleName()));
+        }
+
+        Object unwrappedTarget = unwrapBridgeProxy(targetBean);
+
+        Method targetMethod = findMatchingMethod(targetInterface, request.methodName(), request.parameterTypes());
+        if (targetMethod == null) {
+            targetMethod = findMatchingMethod(unwrappedTarget.getClass(), request.methodName(), request.parameterTypes());
+        }
+
+        if (targetMethod == null) {
+            String err = "Method '" + request.methodName() + "' with parameter types "
+                    + request.parameterTypes() + " not found on interface " + targetInterface.getName();
+            log.error(err);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(BridgeInvocationResponse.error(err, 0, request.moduleName()));
+        }
+
+        Object[] args;
+        try {
+            args = deserializeArguments(targetMethod, request.arguments());
+        } catch (Exception ex) {
+            String err = "Failed to deserialize arguments for method '" + targetMethod.getName() + "': " + ex.getMessage();
+            log.error(err, ex);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(BridgeInvocationResponse.error(err, 0, request.moduleName()));
+        }
+
+        long start = System.currentTimeMillis();
+        try {
+            Object result = targetMethod.invoke(unwrappedTarget, args);
+            long durationMs = System.currentTimeMillis() - start;
+            JsonNode resultNode = result != null ? objectMapper.valueToTree(result) : null;
+            return ResponseEntity.ok(BridgeInvocationResponse.success(resultNode, durationMs, request.moduleName()));
+        } catch (InvocationTargetException ite) {
+            long durationMs = System.currentTimeMillis() - start;
+            Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
+            String errorMsg = (cause.getMessage() != null && !cause.getMessage().isBlank())
+                    ? cause.getMessage()
+                    : cause.toString();
+            log.error("Execution exception in method '{}' of module '{}': {}",
+                    targetMethod.getName(), request.moduleName(), errorMsg);
+            return ResponseEntity.ok(BridgeInvocationResponse.error(errorMsg, durationMs, request.moduleName()));
+        } catch (Exception ex) {
+            long durationMs = System.currentTimeMillis() - start;
+            log.error("Invocation failure on module '{}': {}", request.moduleName(), ex.getMessage(), ex);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(BridgeInvocationResponse.error(ex.getMessage(), durationMs, request.moduleName()));
+        }
+    }
+
+    private Class<?> resolveInterface(String interfaceName) {
+        if (!StringUtils.hasText(interfaceName)) {
+            return null;
+        }
+        ClassLoader cl = applicationContext.getClassLoader() != null
+                ? applicationContext.getClassLoader()
+                : ClassUtils.getDefaultClassLoader();
+
+        try {
+            return ClassUtils.forName(interfaceName, cl);
+        } catch (ClassNotFoundException ignored) {
+        }
+
+        // Search among known beans for an interface matching interfaceName simple name
+        for (String beanName : applicationContext.getBeanDefinitionNames()) {
+            try {
+                Class<?> type = applicationContext.getType(beanName);
+                if (type != null) {
+                    for (Class<?> iface : ClassUtils.getAllInterfacesForClass(type)) {
+                        if (iface.getName().equals(interfaceName) || iface.getSimpleName().equals(interfaceName)) {
+                            return iface;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    private Object resolveTargetBean(Class<?> targetInterface, String moduleName) {
+        Map<String, ?> beans = applicationContext.getBeansOfType(targetInterface);
+        if (beans.isEmpty()) {
+            return null;
+        }
+        if (beans.size() == 1) {
+            return beans.values().iterator().next();
+        }
+
+        String basePackage = properties.getBasePackage();
+        for (Object candidate : beans.values()) {
+            Object unwrapped = unwrapBridgeProxy(candidate);
+            Optional<String> mod = inspector.resolveModuleName(unwrapped.getClass(), basePackage);
+            if (mod.isPresent() && mod.get().equalsIgnoreCase(moduleName)) {
+                return candidate;
+            }
+        }
+
+        return beans.values().iterator().next();
+    }
+
+    /**
+     * Unwraps any ModulithBridgeInvocationHandler proxy to the raw local target bean to prevent recursion.
+     */
+    public Object unwrapBridgeProxy(Object bean) {
+        Object current = bean;
+        while (current != null && Proxy.isProxyClass(current.getClass())) {
+            InvocationHandler handler = Proxy.getInvocationHandler(current);
+            if (handler instanceof ModulithBridgeInvocationHandler bridgeHandler) {
+                Object target = bridgeHandler.getLocalTarget();
+                if (target != null && target != current) {
+                    current = target;
+                    continue;
+                }
+            }
+            try {
+                Method getLocalTarget = handler.getClass().getMethod("getLocalTarget");
+                Object target = getLocalTarget.invoke(handler);
+                if (target != null && target != current) {
+                    current = target;
+                    continue;
+                }
+            } catch (Exception ignored) {
+            }
+            break;
+        }
+        return current;
+    }
+
+    private Method findMatchingMethod(Class<?> targetClass, String methodName, List<String> paramTypeNames) {
+        for (Method method : targetClass.getMethods()) {
+            if (!method.getName().equals(methodName)) {
+                continue;
+            }
+            Class<?>[] paramTypes = method.getParameterTypes();
+            if (paramTypes.length != paramTypeNames.size()) {
+                continue;
+            }
+            boolean matches = true;
+            for (int i = 0; i < paramTypes.length; i++) {
+                String expected = paramTypeNames.get(i);
+                Class<?> actual = paramTypes[i];
+                if (!actual.getName().equals(expected) && !actual.getSimpleName().equals(expected)) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                return method;
+            }
+        }
+        return null;
+    }
+
+    private Object[] deserializeArguments(Method method, List<JsonNode> jsonArgs) throws Exception {
+        Type[] genericParamTypes = method.getGenericParameterTypes();
+        Object[] args = new Object[genericParamTypes.length];
+        for (int i = 0; i < genericParamTypes.length; i++) {
+            JsonNode node = i < jsonArgs.size() ? jsonArgs.get(i) : null;
+            if (node == null || node.isNull()) {
+                args[i] = null;
+            } else {
+                JavaType javaType = objectMapper.getTypeFactory().constructType(genericParamTypes[i]);
+                args[i] = objectMapper.readerFor(javaType).readValue(node);
+            }
+        }
+        return args;
+    }
+}

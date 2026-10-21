@@ -2,6 +2,7 @@ package com.builtbyjuls.strangler.slice;
 
 import java.lang.reflect.Method;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -12,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.MutablePropertyValues;
 import org.springframework.beans.PropertyValue;
+import org.springframework.beans.factory.BeanClassLoaderAware;
 import org.springframework.beans.factory.FactoryBean;
 import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
 import org.springframework.beans.factory.config.BeanDefinition;
@@ -22,6 +24,7 @@ import org.springframework.beans.factory.config.TypedStringValue;
 import org.springframework.beans.factory.support.AbstractBeanDefinition;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.beans.factory.support.BeanDefinitionRegistryPostProcessor;
+import org.springframework.beans.factory.support.RootBeanDefinition;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.Ordered;
@@ -35,16 +38,18 @@ import org.springframework.util.StringUtils;
 import com.builtbyjuls.strangler.annotation.EnableModulithBridge;
 import com.builtbyjuls.strangler.config.BridgeMode;
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
+import com.builtbyjuls.strangler.proxy.RemoteBridgeProxyFactoryBean;
 
 /**
  * Prunes bean definitions belonging to non-hosted application modules before singleton instantiation.
  */
-public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryPostProcessor, EnvironmentAware, Ordered {
+public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryPostProcessor, EnvironmentAware, BeanClassLoaderAware, Ordered {
 
     private static final Logger log = LoggerFactory.getLogger(ModuleSliceRegistryPostProcessor.class);
 
     private final ModuleLayoutInspector inspector;
     private Environment environment;
+    private ClassLoader beanClassLoader;
     private ModulithBridgeProperties properties;
     private String basePackage;
     private String hostOnly;
@@ -65,12 +70,21 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
         this.environment = environment;
     }
 
+    @Override
+    public void setBeanClassLoader(ClassLoader classLoader) {
+        this.beanClassLoader = classLoader;
+    }
+
     public void setBasePackage(String basePackage) {
         this.basePackage = basePackage;
     }
 
     public void setHostOnly(String hostOnly) {
         this.hostOnly = hostOnly;
+    }
+
+    public void setProperties(ModulithBridgeProperties properties) {
+        this.properties = properties;
     }
 
     @Override
@@ -109,6 +123,7 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
 
         boolean hasHostOnly = StringUtils.hasText(this.hostOnly);
         String activeHostModule = hasHostOnly ? this.hostOnly.trim().toLowerCase() : null;
+        Map<Class<?>, String> remoteProxyInterfaces = new LinkedHashMap<>();
 
         for (String beanName : registry.getBeanDefinitionNames()) {
             if (!registry.containsBeanDefinition(beanName)) {
@@ -122,6 +137,8 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
             }
 
             boolean shouldRemove = false;
+            boolean isRemotePruned = false;
+            String remoteModuleName = null;
             for (String className : candidateClasses) {
                 if (inspector.isRootClass(className, this.basePackage)) {
                     continue;
@@ -143,11 +160,16 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
                 // 2. Remote non-fallback pruning: remove internal beans of remote module on the main node
                 if (!hasHostOnly && remoteNonFallbackModules.contains(moduleName) && inspector.isInternal(className)) {
                     shouldRemove = true;
+                    isRemotePruned = true;
+                    remoteModuleName = moduleName;
                     break;
                 }
             }
 
             if (shouldRemove) {
+                if (isRemotePruned && remoteModuleName != null) {
+                    collectRemoteApiInterfaces(candidateClasses, remoteModuleName, remoteProxyInterfaces);
+                }
                 log.info("Pruned bean definition '{}' (classes: {}) for module slicing", beanName, candidateClasses);
                 for (String alias : registry.getAliases(beanName)) {
                     registry.removeAlias(alias);
@@ -162,6 +184,39 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
                     }
                 }
                 registry.removeBeanDefinition(beanName);
+            }
+        }
+
+        // Register remote-only proxy FactoryBeans for pruned module interfaces
+        for (Map.Entry<Class<?>, String> entry : remoteProxyInterfaces.entrySet()) {
+            Class<?> iface = entry.getKey();
+            String modName = entry.getValue();
+            String proxyBeanName = StringUtils.uncapitalize(iface.getSimpleName());
+            if (!registry.containsBeanDefinition(proxyBeanName)) {
+                RootBeanDefinition proxyBd = new RootBeanDefinition(RemoteBridgeProxyFactoryBean.class);
+                proxyBd.setTargetType(iface);
+                proxyBd.setAttribute(FactoryBean.OBJECT_TYPE_ATTRIBUTE, iface);
+                proxyBd.getPropertyValues().add("interfaceType", iface);
+                proxyBd.getPropertyValues().add("moduleName", modName);
+                registry.registerBeanDefinition(proxyBeanName, proxyBd);
+                log.info("Registered remote-only proxy FactoryBean '{}' for interface '{}' (module: '{}')",
+                        proxyBeanName, iface.getName(), modName);
+            }
+        }
+    }
+
+    private void collectRemoteApiInterfaces(
+            Set<String> candidateClasses,
+            String moduleName,
+            Map<Class<?>, String> remoteProxyInterfaces
+    ) {
+        ClassLoader cl = this.beanClassLoader != null ? this.beanClassLoader : ClassUtils.getDefaultClassLoader();
+        for (String className : candidateClasses) {
+            try {
+                Class<?> clazz = ClassUtils.forName(className, cl);
+                Optional<Class<?>> apiIface = inspector.findModuleApiInterface(clazz);
+                apiIface.ifPresent(iface -> remoteProxyInterfaces.put(iface, moduleName));
+            } catch (Throwable ignored) {
             }
         }
     }
@@ -239,6 +294,10 @@ public class ModuleSliceRegistryPostProcessor implements BeanDefinitionRegistryP
 
         if (!StringUtils.hasText(this.basePackage) && StringUtils.hasText(discoveredBasePackage)) {
             this.basePackage = discoveredBasePackage;
+        }
+
+        if (this.properties != null && !StringUtils.hasText(this.properties.getBasePackage()) && StringUtils.hasText(this.basePackage)) {
+            this.properties.setBasePackage(this.basePackage);
         }
     }
 
