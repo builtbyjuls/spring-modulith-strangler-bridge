@@ -42,13 +42,18 @@ This project provides a reusable Spring Boot starter (**`modulith-strangler-star
 ```text
 spring-modulith-strangler-bridge/
 |-- pom.xml                                 # Parent BOM (Java 21, Spring Boot 4.1.x, Spring Modulith 2.1.1)
+|-- Dockerfile                              # Multi-stage build for single-JAR runtime container
+|-- docker-compose.yml                      # Reference stack: postgres, metering-worker, modulith-main
+|-- k8s/manifests.yaml                      # Reference Kubernetes Deployment & Service manifests
+|-- .github/workflows/ci.yml                # CI build, step summary publishing, and artifact upload
 |-- modulith-strangler-starter/             # Reusable Strangler Bridge Starter Module
 |   |-- src/main/java/.../annotation/       # @EnableModulithBridge, @ModulithBridgeTarget
 |   |-- src/main/java/.../config/           # ModulithBridgeAutoConfiguration, ModulithBridgeProperties
 |   |-- src/main/java/.../slice/            # ModuleLayoutInspector, ModuleSliceRegistryPostProcessor
 |   |-- src/main/java/.../proxy/            # ModulithBridgeBeanPostProcessor, ModulithBridgeInvocationHandler
 |   |-- src/main/java/.../transport/        # BridgeHttpClient, ModulithBridgeInboundController
-|   \-- src/main/java/.../parity/           # ShadowParityVerifier, ShadowParityResult
+|   |-- src/main/java/.../parity/           # ShadowParityVerifier, ShadowParityResult
+|   \-- src/main/java/.../report/           # StranglerReportExporter, DeploymentManifestGenerator
 \-- grid-settlement-modulith-demo/          # Wholesale Energy Settlement Modulith Demo App
     |-- src/main/java/.../contract/         # Module 1: Bilateral Contracts & Declarations (ContractApi)
     |-- src/main/java/.../metering/         # Module 2: 288-Interval Telemetry Aggregation (MeteringApi)
@@ -84,6 +89,18 @@ To allow the exact same JAR artifact to run either as the full monolith or as a 
 
 * **Scale-Normalized Comparison**: Converts both `LOCAL` and `REMOTE` return values into Jackson `JsonNode` trees and compares them recursively. Numeric nodes are compared via `BigDecimal.compareTo()` so scale differences (`1250.50` vs `1250.500000`) evaluate as equal.
 * **Audit Recording**: Stores `ShadowParityResult` entries in a thread-safe registry (`matched`, `localDurationMs`, `remoteDurationMs`, `diffSummary`) for verification in integration tests.
+
+### 3.5 CI/CD Parity Reporting (`StranglerReportExporter`)
+
+* **Structured JSON (`report.json`)**: Emits `generatedAt` timestamp, active `hostOnly` slice, invocation totals, match and mismatch counts, fallback counts, calculated parity rate, configured module routing maps, and a complete audit log of `ShadowParityResult` records.
+* **GitHub Actions Summary (`summary.md`)**: Renders markdown tables formatted for `$GITHUB_STEP_SUMMARY`, surfacing headline metrics, routing topologies, per-method latency in milliseconds, and divergence diffs.
+* **Shutdown Hook**: Listens on `ContextClosedEvent` (and implements `DisposableBean`) to guarantee export on process shutdown when `exportReports=true` and parity events exist.
+
+### 3.6 Deployment Manifest Generation (`DeploymentManifestGenerator`)
+
+* **Single-JAR Architecture**: Both the main orchestrator and extracted workers run the identical JAR binary and container image. Worker processes specify `--modulith.bridge.host-only=<module>` on startup to prune other modules before initialization.
+* **Docker Compose (`docker-compose.strangler.yml`)**: Dynamically configures PostgreSQL 16 healthchecks, extracted worker containers with JVM virtual thread flags, and the main monolith container wired with worker HTTP endpoints.
+* **Kubernetes Orchestration (`k8s-strangler.yaml`)**: Generates independent `Deployment` and `Service` resources for workers and monolith instances, assigning custom replica counts and resource requests/limits.
 
 ---
 

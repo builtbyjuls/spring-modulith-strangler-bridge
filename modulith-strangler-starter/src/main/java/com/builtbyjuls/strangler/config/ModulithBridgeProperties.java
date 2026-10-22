@@ -32,6 +32,16 @@ public class ModulithBridgeProperties {
     private boolean shadowAwait = false;
 
     /**
+     * Whether to automatically export structured strangler reports on shutdown.
+     */
+    private boolean exportReports = true;
+
+    /**
+     * Directory path where parity reports and container manifests are exported.
+     */
+    private String reportDir = "target/strangler-reports";
+
+    /**
      * Per-module routing configurations.
      */
     private Map<String, ModuleRouteConfig> modules = new LinkedHashMap<>();
@@ -66,6 +76,22 @@ public class ModulithBridgeProperties {
 
     public void setShadowAwait(boolean shadowAwait) {
         this.shadowAwait = shadowAwait;
+    }
+
+    public boolean isExportReports() {
+        return exportReports;
+    }
+
+    public void setExportReports(boolean exportReports) {
+        this.exportReports = exportReports;
+    }
+
+    public String getReportDir() {
+        return reportDir;
+    }
+
+    public void setReportDir(String reportDir) {
+        this.reportDir = reportDir;
     }
 
     public Map<String, ModuleRouteConfig> getModules() {

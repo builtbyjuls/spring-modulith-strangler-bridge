@@ -1,8 +1,11 @@
 package com.builtbyjuls.grid;
 
+import java.io.IOException;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,6 +40,8 @@ import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
 import com.builtbyjuls.strangler.parity.ShadowParityResult;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
+import com.builtbyjuls.strangler.report.DeploymentManifestGenerator;
+import com.builtbyjuls.strangler.report.StranglerReportExporter;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.builtbyjuls.strangler.transport.BridgeInvocationResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -73,6 +78,12 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
 
     @Autowired
     private MeteringApi meteringApi;
+
+    @Autowired
+    private StranglerReportExporter reportExporter;
+
+    @Autowired
+    private DeploymentManifestGenerator manifestGenerator;
 
     @DynamicPropertySource
     static void configureRemoteBridge(DynamicPropertyRegistry registry) {
@@ -259,5 +270,32 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
             config.setUrl(originalUrl);
             config.setFallbackToLocal(originalFallback);
         }
+    }
+
+    @Test
+    @DisplayName("Exports structured strangler reports and container manifests to target/strangler-reports")
+    void shouldExportStructuredReportsAndDeploymentManifests() throws IOException {
+        settlementOrchestrator.settleTradingDay(TRADING_DATE);
+        assertThat(parityRegistry.getTotalCount()).isGreaterThan(0);
+
+        Path exportedDir = reportExporter.exportReports();
+        assertThat(exportedDir).isNotNull();
+
+        Path reportJson = exportedDir.resolve("report.json");
+        Path summaryMd = exportedDir.resolve("summary.md");
+        Path composeFile = exportedDir.resolve("docker-compose.strangler.yml");
+        Path k8sFile = exportedDir.resolve("k8s-strangler.yaml");
+
+        assertThat(Files.exists(reportJson)).isTrue();
+        assertThat(Files.size(reportJson)).isGreaterThan(0);
+
+        assertThat(Files.exists(summaryMd)).isTrue();
+        assertThat(Files.size(summaryMd)).isGreaterThan(0);
+
+        assertThat(Files.exists(composeFile)).isTrue();
+        assertThat(Files.size(composeFile)).isGreaterThan(0);
+
+        assertThat(Files.exists(k8sFile)).isTrue();
+        assertThat(Files.size(k8sFile)).isGreaterThan(0);
     }
 }

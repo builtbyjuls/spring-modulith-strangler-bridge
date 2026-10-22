@@ -15,6 +15,8 @@ import org.springframework.web.client.RestClient;
 import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeBeanPostProcessor;
+import com.builtbyjuls.strangler.report.DeploymentManifestGenerator;
+import com.builtbyjuls.strangler.report.StranglerReportExporter;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.slice.ModuleSliceRegistryPostProcessor;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
@@ -78,6 +80,25 @@ public class ModulithBridgeAutoConfiguration {
     @ConditionalOnMissingBean
     public ShadowParityRegistry shadowParityRegistry() {
         return new ShadowParityRegistry();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public DeploymentManifestGenerator deploymentManifestGenerator(ModulithBridgeProperties properties) {
+        return new DeploymentManifestGenerator(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public StranglerReportExporter stranglerReportExporter(
+            ShadowParityRegistry shadowParityRegistry,
+            ModulithBridgeProperties properties,
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            ObjectProvider<DeploymentManifestGenerator> manifestGeneratorProvider
+    ) {
+        ObjectMapper mapper = objectMapperProvider.getIfAvailable();
+        DeploymentManifestGenerator generator = manifestGeneratorProvider.getIfAvailable();
+        return new StranglerReportExporter(shadowParityRegistry, properties, mapper, generator);
     }
 
     @Bean
