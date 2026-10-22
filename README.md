@@ -1,5 +1,9 @@
 # Spring Modulith Strangler Bridge
 
+[![Maven Central](https://img.shields.io/maven-central/v/com.builtbyjuls/modulith-strangler-starter.svg)](https://central.sonatype.com/artifact/com.builtbyjuls/modulith-strangler-starter)
+[![CI](https://github.com/builtbyjuls/spring-modulith-strangler-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/builtbyjuls/spring-modulith-strangler-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A reusable **Spring Boot 4.1 starter** (`modulith-strangler-starter`) that brings **zero-code microservice extraction**, **single-JAR runtime module slicing**, and **shadow parity verification** to **Spring Modulith** applications.
 
 * **Tech Stack**: **Java 21** (Virtual Threads), **Spring Boot 4.1.x**, **Spring Modulith 2.1.1**, **PostgreSQL 16** (Testcontainers), **Hibernate ORM 7.x**.
@@ -182,3 +186,29 @@ cd spring-modulith-strangler-bridge
 # 2. Run the Testcontainers suite
 ./mvnw test
 ```
+
+### Maven / Gradle Dependency
+
+Add `modulith-strangler-starter` to your application:
+
+#### Maven (`pom.xml`)
+
+```xml
+<dependency>
+    <groupId>com.builtbyjuls</groupId>
+    <artifactId>modulith-strangler-starter</artifactId>
+    <version>0.1.0</version>
+</dependency>
+```
+
+#### Gradle (`build.gradle`)
+
+```groovy
+implementation 'com.builtbyjuls:modulith-strangler-starter:0.1.0'
+```
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [MIT](LICENSE) license for details.

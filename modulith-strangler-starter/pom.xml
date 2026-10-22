@@ -16,6 +16,10 @@
     <name>modulith-strangler-starter</name>
     <description>Reusable Spring Boot starter for Spring Modulith runtime slicing, local-to-remote routing, and shadow parity</description>
 
+    <properties>
+        <maven.deploy.skip>false</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
