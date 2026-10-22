@@ -78,12 +78,69 @@ When running a module in **`SHADOW`** mode during strangler migration, the start
 
 ---
 
-## CI/CD Parity Reporting
+## CI/CD Parity Reporting & Quality Gates
 
-On application shutdown or explicit invocation, `StranglerReportExporter` writes audit artifacts to `target/strangler-reports/`:
+On application shutdown or explicit invocation, `StranglerReportExporter` writes audit artifacts to `target/strangler-reports/`. Reporting is **CI-platform agnostic**, allowing teams using GitLab CI, Jenkins, Azure DevOps, Bitbucket, CircleCI, or GitHub Actions to enforce parity gates without proprietary plugins:
 
-* **`report.json`**: Machine-readable JSON report with timestamp, slice state, invocation totals, match/mismatch/fallback metrics, parity percentage, and full `ShadowParityResult` audit records.
-* **`summary.md`**: GitHub-flavored Markdown report rendered to `$GITHUB_STEP_SUMMARY` in CI pipelines, documenting metrics, module routing topology, and invocation outcomes.
+* **`report.json`**: Machine-readable JSON report with timestamp, slice state, invocation totals, match/mismatch/fallback metrics, parity percentage, and full `ShadowParityResult` audit records (ideal for `jq` CLI gates and observability ingestion).
+* **`junit-parity.xml`**: Standard JUnit XML test suite (`ModulithStranglerParity`) mapping each parity invocation to a `<testcase>` and mismatches to `<failure type="ShadowParityMismatch">`. Natively supported by GitLab CI, Jenkins, CircleCI, Bitbucket, and Azure DevOps test dashboards.
+* **`summary.md`**: Clean Markdown tables formatted for GitHub Actions (`$GITHUB_STEP_SUMMARY`), GitLab merge request descriptions, or Azure DevOps build summaries.
+* **Console ASCII Summary & Parity Gate**: Formatted ASCII summary banner logged directly to standard build logs (`modulith.bridge.log-console-summary=true`). Setting `modulith.bridge.fail-on-mismatch=true` automatically halts builds on any shadow mismatch via `ShadowParityMismatchException`.
+
+### CI Integration Examples
+
+#### GitLab CI (`.gitlab-ci.yml`)
+
+```yaml
+strangler-parity-test:
+  stage: test
+  script:
+    - ./mvnw test -Dmodulith.bridge.fail-on-mismatch=true
+  artifacts:
+    when: always
+    reports:
+      junit: target/strangler-reports/junit-parity.xml
+    paths:
+      - target/strangler-reports/
+```
+
+#### Jenkins Pipeline (`Jenkinsfile`)
+
+```groovy
+stage('Shadow Parity') {
+    steps {
+        sh './mvnw test -Dmodulith.bridge.fail-on-mismatch=true'
+    }
+    post {
+        always {
+            junit 'target/strangler-reports/junit-parity.xml'
+            archiveArtifacts artifacts: 'target/strangler-reports/**', allowEmptyArchive: true
+        }
+    }
+}
+```
+
+#### GitHub Actions (`.github/workflows/ci.yml`)
+
+```yaml
+- name: Publish Step Summary
+  if: always()
+  run: |
+    if [ -f target/strangler-reports/summary.md ]; then
+      cat target/strangler-reports/summary.md >> $GITHUB_STEP_SUMMARY
+    fi
+```
+
+#### Any CI Shell Gate (`jq`)
+
+```bash
+# Verify 100% parity rate using report.json
+PARITY_RATE=$(jq -r '.parityRatePercent' target/strangler-reports/report.json)
+if [ "$PARITY_RATE" != "100.0" ] && [ "$PARITY_RATE" != "100" ]; then
+  echo "Strangler parity gate failed: $PARITY_RATE%"
+  exit 1
+fi
+```
 
 ---
 

@@ -283,6 +283,7 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
 
         Path reportJson = exportedDir.resolve("report.json");
         Path summaryMd = exportedDir.resolve("summary.md");
+        Path junitXml = exportedDir.resolve("junit-parity.xml");
         Path composeFile = exportedDir.resolve("docker-compose.strangler.yml");
         Path k8sFile = exportedDir.resolve("k8s-strangler.yaml");
 
@@ -291,6 +292,9 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
 
         assertThat(Files.exists(summaryMd)).isTrue();
         assertThat(Files.size(summaryMd)).isGreaterThan(0);
+
+        assertThat(Files.exists(junitXml)).isTrue();
+        assertThat(Files.size(junitXml)).isGreaterThan(0);
 
         assertThat(Files.exists(composeFile)).isTrue();
         assertThat(Files.size(composeFile)).isGreaterThan(0);

@@ -42,6 +42,16 @@ public class ModulithBridgeProperties {
     private String reportDir = "target/strangler-reports";
 
     /**
+     * Whether to log a formatted ASCII summary banner to standard console output on export.
+     */
+    private boolean logConsoleSummary = true;
+
+    /**
+     * Whether report export fails with an exception when shadow parity mismatches are detected.
+     */
+    private boolean failOnMismatch = false;
+
+    /**
      * Per-module routing configurations.
      */
     private Map<String, ModuleRouteConfig> modules = new LinkedHashMap<>();
@@ -92,6 +102,22 @@ public class ModulithBridgeProperties {
 
     public void setReportDir(String reportDir) {
         this.reportDir = reportDir;
+    }
+
+    public boolean isLogConsoleSummary() {
+        return logConsoleSummary;
+    }
+
+    public void setLogConsoleSummary(boolean logConsoleSummary) {
+        this.logConsoleSummary = logConsoleSummary;
+    }
+
+    public boolean isFailOnMismatch() {
+        return failOnMismatch;
+    }
+
+    public void setFailOnMismatch(boolean failOnMismatch) {
+        this.failOnMismatch = failOnMismatch;
     }
 
     public Map<String, ModuleRouteConfig> getModules() {
