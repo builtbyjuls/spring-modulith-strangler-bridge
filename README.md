@@ -74,7 +74,7 @@ When running a module in **`SHADOW`** mode during strangler migration, the start
 
 ## Repository Structure
 
-* **`modulith-strangler-starter/`**: Reusable **Spring Boot starter** containing `@EnableModulithBridge`, `ModuleSliceRegistryPostProcessor`, `ModulithBridgeBeanPostProcessor`, `ModulithBridgeInboundController`, `ShadowParityVerifier`, `StranglerReportExporter`, and `DeploymentManifestGenerator`.
+* **`modulith-strangler-starter/`**: Reusable **Spring Boot starter** containing `@EnableModulithBridge`, `ModuleSliceRegistryPostProcessor`, `ModuleSliceEntityPostProcessor`, `ModuleContractValidator`, `ModulithBridgeBeanPostProcessor`, `ModulithBridgeInboundController`, `ShadowParityVerifier`, `StranglerReportExporter`, and `DeploymentManifestGenerator`.
 * **`grid-settlement-modulith-demo/`**: Wholesale **electricity market settlement modulith** modeling **288 daily 5-minute dispatch intervals** across `contract`, `metering`, and `settlement` modules.
 * **`Dockerfile`**, **`docker-compose.yml`**, **`k8s/manifests.yaml`**: Reference containerization and Kubernetes orchestration manifests for single-image worker extraction.
 * **`.github/workflows/ci.yml`**: GitHub Actions workflow running tests, uploading report artifacts, and publishing Markdown summaries to `$GITHUB_STEP_SUMMARY`.

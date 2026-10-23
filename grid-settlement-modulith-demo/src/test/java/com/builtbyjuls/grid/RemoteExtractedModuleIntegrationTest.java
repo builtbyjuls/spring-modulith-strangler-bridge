@@ -4,6 +4,8 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -18,10 +20,19 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import com.builtbyjuls.grid.contract.internal.BilateralContract;
+import com.builtbyjuls.grid.contract.internal.ContractDeclaration;
+import com.builtbyjuls.grid.contract.internal.IntervalQuantity;
+import com.builtbyjuls.grid.contract.internal.MarketParticipant;
 import com.builtbyjuls.grid.fixture.GridDataSeeder;
 import com.builtbyjuls.grid.metering.MeteringApi;
+import com.builtbyjuls.grid.metering.internal.MeterIntervalReading;
+import com.builtbyjuls.grid.metering.internal.MeterReadingHeader;
 import com.builtbyjuls.grid.settlement.DailySettlementPositionDto;
 import com.builtbyjuls.grid.settlement.GridDailySettlementService;
+
+import jakarta.persistence.EntityManagerFactory;
+import jakarta.persistence.metamodel.EntityType;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -87,6 +98,23 @@ class RemoteExtractedModuleIntegrationTest extends PostgreSqlTestContainerBase {
         assertThat(workerContext.containsBean("bilateralContractRepository")).isFalse();
         assertThat(workerContext.containsBean("marketParticipantRepository")).isFalse();
         assertThat(workerContext.containsBean("intervalQuantityRepository")).isFalse();
+
+        // Assert worker node EntityManagerFactory metamodel contains only metering entities
+        EntityManagerFactory emf = workerContext.getBean(EntityManagerFactory.class);
+        Set<Class<?>> entityClasses = emf.getMetamodel().getEntities().stream()
+                .map(EntityType::getJavaType)
+                .collect(Collectors.toSet());
+
+        assertThat(entityClasses).contains(
+                MeterReadingHeader.class,
+                MeterIntervalReading.class
+        );
+        assertThat(entityClasses).doesNotContain(
+                MarketParticipant.class,
+                BilateralContract.class,
+                ContractDeclaration.class,
+                IntervalQuantity.class
+        );
     }
 
     @Test

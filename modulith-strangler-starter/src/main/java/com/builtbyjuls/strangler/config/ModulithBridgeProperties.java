@@ -52,6 +52,11 @@ public class ModulithBridgeProperties {
     private boolean failOnMismatch = false;
 
     /**
+     * Whether to validate module boundary interface contracts at startup.
+     */
+    private boolean validateContracts = true;
+
+    /**
      * Per-module routing configurations.
      */
     private Map<String, ModuleRouteConfig> modules = new LinkedHashMap<>();
@@ -118,6 +123,14 @@ public class ModulithBridgeProperties {
 
     public void setFailOnMismatch(boolean failOnMismatch) {
         this.failOnMismatch = failOnMismatch;
+    }
+
+    public boolean isValidateContracts() {
+        return validateContracts;
+    }
+
+    public void setValidateContracts(boolean validateContracts) {
+        this.validateContracts = validateContracts;
     }
 
     public Map<String, ModuleRouteConfig> getModules() {

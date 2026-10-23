@@ -3,6 +3,7 @@ package com.builtbyjuls.strangler.config;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
@@ -12,12 +13,14 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Role;
 import org.springframework.web.client.RestClient;
 
+import com.builtbyjuls.strangler.contract.ModuleContractValidator;
 import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeBeanPostProcessor;
 import com.builtbyjuls.strangler.report.DeploymentManifestGenerator;
 import com.builtbyjuls.strangler.report.StranglerReportExporter;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
+import com.builtbyjuls.strangler.slice.ModuleSliceEntityPostProcessor;
 import com.builtbyjuls.strangler.slice.ModuleSliceRegistryPostProcessor;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.builtbyjuls.strangler.transport.ModulithBridgeInboundController;
@@ -43,6 +46,27 @@ public class ModulithBridgeAutoConfiguration {
     @ConditionalOnMissingBean
     public static ModuleSliceRegistryPostProcessor moduleSliceRegistryPostProcessor() {
         return new ModuleSliceRegistryPostProcessor();
+    }
+
+    @Bean
+    @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
+    @ConditionalOnClass(name = "org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean")
+    @ConditionalOnMissingBean
+    public static ModuleSliceEntityPostProcessor moduleSliceEntityPostProcessor(
+            ObjectProvider<ModuleLayoutInspector> moduleLayoutInspectorProvider,
+            ObjectProvider<ModulithBridgeProperties> propertiesProvider
+    ) {
+        return new ModuleSliceEntityPostProcessor(moduleLayoutInspectorProvider, propertiesProvider);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ModuleContractValidator moduleContractValidator(
+            ApplicationContext applicationContext,
+            ModuleLayoutInspector moduleLayoutInspector,
+            ModulithBridgeProperties properties
+    ) {
+        return new ModuleContractValidator(applicationContext, moduleLayoutInspector, properties);
     }
 
     @Bean

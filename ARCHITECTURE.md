@@ -65,12 +65,12 @@ spring-modulith-strangler-bridge/
 
 ## 3. Core Engine (`modulith-strangler-starter`)
 
-### 3.1 Runtime Module Slicing (`ModuleSliceRegistryPostProcessor`)
+### 3.1 Runtime Module Slicing (`ModuleSliceRegistryPostProcessor` & `ModuleSliceEntityPostProcessor`)
 
 To allow the exact same JAR artifact to run either as the full monolith or as a stripped single-module microservice:
 
-* **Pre-Instantiation Pruning**: `ModuleSliceRegistryPostProcessor` implements `BeanDefinitionRegistryPostProcessor` and `EnvironmentAware`. It inspects `modulith.bridge.host-only` (e.g., `metering`) and `modulith.bridge.base-package` (e.g., `com.builtbyjuls.grid`).
-* **Package Boundary Matching**: Every application module maps to `<basePackage>.<moduleName>..*`. When `host-only=metering` is configured, bean definitions whose bean class or factory method resides in another module sub-package (`contract`, `settlement`) are removed from the `BeanDefinitionRegistry` before Spring creates singletons.
+* **Pre-Instantiation Bean Pruning**: `ModuleSliceRegistryPostProcessor` implements `BeanDefinitionRegistryPostProcessor` and `EnvironmentAware`. It inspects `modulith.bridge.host-only` (e.g., `metering`) and `modulith.bridge.base-package` (e.g., `com.builtbyjuls.grid`). When `host-only=metering` is configured, bean definitions whose bean class or factory method resides in another module sub-package (`contract`, `settlement`) are removed from the `BeanDefinitionRegistry` before Spring creates singletons.
+* **Hibernate Entity Slicing**: `ModuleSliceEntityPostProcessor` intercepts `LocalContainerEntityManagerFactoryBean` before initialization and attaches a `PersistenceUnitPostProcessor`. In `host-only` mode, it removes managed entity class names from `PersistenceUnitInfo.getManagedClassNames()` belonging to non-hosted modules, ensuring Hibernate builds metamodels only for the hosted slice. On the main node, internal entities of `REMOTE` modules with `fallback-to-local=false` are likewise pruned.
 
 ### 3.2 Dynamic Proxy Routing (`ModulithBridgeBeanPostProcessor`)
 
@@ -105,6 +105,12 @@ Reporting is designed to be completely CI-platform agnostic, emitting native art
 * **Single-JAR Architecture**: Both the main orchestrator and extracted workers run the identical JAR binary and container image. Worker processes specify `--modulith.bridge.host-only=<module>` on startup to prune other modules before initialization.
 * **Docker Compose (`docker-compose.strangler.yml`)**: Dynamically configures PostgreSQL 16 healthchecks, extracted worker containers with JVM virtual thread flags, and the main monolith container wired with worker HTTP endpoints.
 * **Kubernetes Orchestration (`k8s-strangler.yaml`)**: Generates independent `Deployment` and `Service` resources for workers and monolith instances, assigning custom replica counts and resource requests/limits.
+
+### 3.7 Startup Contract Validation (`ModuleContractValidator`)
+
+* **Startup Safety Check**: Enabled by default (`modulith.bridge.validate-contracts=true`), `ModuleContractValidator` executes during application startup as a `SmartInitializingSingleton`, inspecting all `@NamedInterface` and `@ModulithBridgeTarget` interfaces under `basePackage`.
+* **Leaked JPA Entity Rejection**: Recursively inspects method parameters and generic return types (unwrapping `Optional<T>`, `Collection<T>`, `Map<K, V>`, and arrays `T[]`). Rejects any type annotated with `@jakarta.persistence.Entity` or `@javax.persistence.Entity` with `InvalidModuleContractException` to prevent remote serialization failures, lazy-loading breaks, and database coupling across nodes.
+* **Non-Serializable Stream Rejection**: Rejects non-serializable streaming and servlet types (`InputStream`, `OutputStream`, `Reader`, `Writer`, `Stream`, `ServletRequest`, `ServletResponse`).
 
 ---
 
