@@ -115,6 +115,20 @@ Reporting is designed to be completely CI-platform agnostic, emitting native art
 * **Leaked JPA Entity Rejection**: Recursively inspects method parameters and generic return types (unwrapping `Optional<T>`, `Collection<T>`, `Map<K, V>`, and arrays `T[]`). Rejects any type annotated with `@jakarta.persistence.Entity` or `@javax.persistence.Entity` with `InvalidModuleContractException` to prevent remote serialization failures, lazy-loading breaks, and database coupling across nodes.
 * **Non-Serializable Stream Rejection**: Rejects non-serializable streaming and servlet types (`InputStream`, `OutputStream`, `Reader`, `Writer`, `Stream`, `ServletRequest`, `ServletResponse`).
 
+### 3.8 Shadow Transaction Rollback & Traffic Sampling
+
+* **Dry-Run Writes (`X-Modulith-Shadow: true`)**: When an interface method is invoked in `SHADOW` mode, `BridgeHttpClient` attaches the HTTP header `X-Modulith-Shadow: true` to the outbound shadow dispatch. On the extracted worker node, `ModulithBridgeInboundController` detects this header:
+  * When `modulith.bridge.shadow-rollback-writes=true` (default `true`) and a `PlatformTransactionManager` bean exists, it executes the target bean method within a `TransactionTemplate` configured with `TransactionDefinition.PROPAGATION_REQUIRES_NEW`.
+  * If an `EntityManager` bean is present, it explicitly triggers `em.flush()` to ensure SQL constraints, triggers, and foreign keys are validated against the database.
+  * In a `finally` block, it calls `status.setRollbackOnly()`, guaranteeing that all remote database mutations are discarded while returning the computed DTO response (or propagating business exceptions) for parity verification.
+* **Traffic Sampling (`shadow-sample-rate`)**: Controls the proportion of calls that trigger shadow verification via `modulith.bridge.shadow-sample-rate` (`0.0` to `1.0`, default `1.0`). Individual modules can override this value via `modulith.bridge.modules.<module>.shadow-sample-rate` to throttle high-throughput production paths without modifying code.
+
+### 3.9 Zero-Restart Live Mode Switching (`ModulithBridgeAdminController`)
+
+* **Runtime Route Reconfiguration**: Exposes `GET` and `POST /internal/modulith-bridge/routes/{moduleName}` to inspect and modify module routing topology (`BridgeMode.LOCAL`, `SHADOW`, `REMOTE`), endpoints, timeout values, local fallback policies, and shadow sample rates in memory.
+* **Thread-Safe Instant Cutover**: Module configurations are maintained in a `ConcurrentHashMap` with `volatile` fields. Existing JDK dynamic proxies inspect the updated configuration on their next invocation, allowing instantaneous zero-downtime cutover (`LOCAL -> SHADOW -> REMOTE`) without restarting JVM containers.
+* **Administrative Authentication**: Requires `X-Modulith-Bridge-Secret` matching `modulith.bridge.secret-token` via constant-time comparison when authentication is enabled.
+
 ---
 
 ## 4. Reference Domain (`grid-settlement-modulith-demo`)
@@ -153,3 +167,5 @@ Wholesale electricity markets settle energy across **288 five-minute dispatch in
 | **Parity Comparison** | **Recursive `JsonNode` + `BigDecimal.compareTo()`** | `Objects.equals()` or raw JSON string comparison | **Why**: Avoids false mismatches caused by JSON key ordering or `BigDecimal` trailing zeros (`10.0` vs `10.000000`).<br><br>**Trade-off**: Incurs JSON tree conversion cost during `SHADOW` mode. |
 | **Error Fallback** | **Smart Error Classification** (`BridgeBusinessException`) | Blanket fallback to local on any error | **Why**: Prevents re-executing invalid domain mutations locally when remote validation legitimately fails.<br><br>**Trade-off**: Requires inbound controller and client to distinguish business exceptions from transport faults. |
 | **Bridge Security** | **Interface Whitelisting & Pre-Shared Secret** | Open reflective dispatch | **Why**: Protects inbound worker endpoints from unauthorized callers and arbitrary bean invocation.<br><br>**Trade-off**: Shared secret must be distributed to communicating services via environment or secret manager. |
+| **Shadow Writes** | **Rollback-Only Transaction (`PROPAGATION_REQUIRES_NEW`)** | Restricting shadow mode to read-only APIs | **Why**: Enables real-world shadow parity verification for write operations by testing inserts/updates and flushing SQL constraints without persisting changes.<br><br>**Trade-off**: Requires target method to execute in an isolated transaction on the worker node. |
+| **Mode Switching** | **In-Memory Admin REST Controller (`ConcurrentHashMap`)** | External config servers (Spring Cloud Config, Consul) | **Why**: Provides zero-restart runtime cutover with zero external infrastructure dependencies.<br><br>**Trade-off**: Multi-replica deployments require triggering the admin endpoint across each instance or integrating with an ingress orchestrator. |

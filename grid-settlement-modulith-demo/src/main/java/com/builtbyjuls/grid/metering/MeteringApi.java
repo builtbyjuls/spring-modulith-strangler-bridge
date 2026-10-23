@@ -1,5 +1,6 @@
 package com.builtbyjuls.grid.metering;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -18,4 +19,14 @@ public interface MeteringApi {
      * @return daily aggregated meter volume DTOs
      */
     List<DailyMeterVolumeDto> aggregateDailyMeterVolumes(LocalDate readingDate);
+
+    /**
+     * Records a manual meter reading adjustment and returns the recorded volume DTO.
+     *
+     * @param meterCode meter identification code
+     * @param readingDate reading date
+     * @param actualMwh actual MWh volume
+     * @return recorded volume DTO
+     */
+    DailyMeterVolumeDto recordMeterReading(String meterCode, LocalDate readingDate, BigDecimal actualMwh);
 }

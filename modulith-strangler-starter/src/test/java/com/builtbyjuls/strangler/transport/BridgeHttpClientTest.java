@@ -23,6 +23,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.headerDoesNotExist;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -229,5 +230,63 @@ class BridgeHttpClientTest {
                     assertThat(bbe.getExceptionType()).isEqualTo("java.lang.IllegalArgumentException");
                     assertThat(bbe.getRemoteMessage()).isEqualTo("Contract interval reading mismatch");
                 });
+    }
+
+    @Test
+    @DisplayName("BridgeHttpClient attaches X-Modulith-Shadow: true header when shadowMode is true")
+    void shouldAttachShadowHeaderWhenShadowModeIsTrue() {
+        String responseJson = """
+                {
+                    "result": null,
+                    "durationMs": 6,
+                    "moduleName": "metering",
+                    "error": null
+                }
+                """;
+
+        mockServer.expect(requestTo("http://worker-node:8080/internal/modulith-bridge/invoke"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header("X-Modulith-Shadow", "true"))
+                .andRespond(withSuccess(responseJson, MediaType.APPLICATION_JSON));
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                "com.example.MeteringApi",
+                "sync",
+                List.of(),
+                List.of()
+        );
+
+        httpClient.invokeRemote("http://worker-node:8080", request, void.class, 5000L, true);
+        mockServer.verify();
+    }
+
+    @Test
+    @DisplayName("BridgeHttpClient omits X-Modulith-Shadow header when shadowMode is false")
+    void shouldOmitShadowHeaderWhenShadowModeIsFalse() {
+        String responseJson = """
+                {
+                    "result": null,
+                    "durationMs": 6,
+                    "moduleName": "metering",
+                    "error": null
+                }
+                """;
+
+        mockServer.expect(requestTo("http://worker-node:8080/internal/modulith-bridge/invoke"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(headerDoesNotExist("X-Modulith-Shadow"))
+                .andRespond(withSuccess(responseJson, MediaType.APPLICATION_JSON));
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                "com.example.MeteringApi",
+                "sync",
+                List.of(),
+                List.of()
+        );
+
+        httpClient.invokeRemote("http://worker-node:8080", request, void.class, 5000L, false);
+        mockServer.verify();
     }
 }

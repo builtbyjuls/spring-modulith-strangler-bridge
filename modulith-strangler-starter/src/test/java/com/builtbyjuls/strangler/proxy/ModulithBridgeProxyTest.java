@@ -663,6 +663,102 @@ class ModulithBridgeProxyTest {
         assertThat(recorded.remoteError()).contains("500 Internal Server Error");
     }
 
+    @Test
+    @DisplayName("SHADOW mode skips remote shadow call when shadowSampleRate is 0.0")
+    void shouldSkipShadowCallWhenShadowSampleRateIsZero() {
+        properties.setShadowAwait(true);
+        properties.setShadowSampleRate(0.0);
+        ModulithBridgeProperties.ModuleRouteConfig route = new ModulithBridgeProperties.ModuleRouteConfig();
+        route.setMode(BridgeMode.SHADOW);
+        route.setUrl("http://remote-worker:8080");
+        properties.getModules().put("metering", route);
+
+        LocalMeteringService localService = new LocalMeteringService();
+        ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
+                localService,
+                "metering",
+                TestMeteringApi.class,
+                properties,
+                httpClient,
+                objectMapper,
+                verifier,
+                registry
+        );
+
+        TestMeteringApi proxy = (TestMeteringApi) Proxy.newProxyInstance(
+                TestMeteringApi.class.getClassLoader(),
+                new Class<?>[]{TestMeteringApi.class},
+                handler
+        );
+
+        List<String> result = proxy.getVolumes(LocalDate.of(2026, 10, 22));
+
+        assertThat(result).containsExactly("LOCAL_VOLUME_2026-10-22");
+        assertThat(localService.localCalls).isEqualTo(1);
+        mockServer.verify(); // No HTTP requests dispatched
+        assertThat(registry.getTotalCount()).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("SHADOW mode honors per-module shadowSampleRate override")
+    void shouldHonorPerModuleShadowSampleRateOverride() {
+        properties.setShadowAwait(true);
+        // Global sample rate is 1.0, but module override is 0.0
+        properties.setShadowSampleRate(1.0);
+        ModulithBridgeProperties.ModuleRouteConfig route = new ModulithBridgeProperties.ModuleRouteConfig();
+        route.setMode(BridgeMode.SHADOW);
+        route.setUrl("http://remote-worker:8080");
+        route.setShadowSampleRate(0.0);
+        properties.getModules().put("metering", route);
+
+        LocalMeteringService localService = new LocalMeteringService();
+        ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
+                localService,
+                "metering",
+                TestMeteringApi.class,
+                properties,
+                httpClient,
+                objectMapper,
+                verifier,
+                registry
+        );
+
+        TestMeteringApi proxy = (TestMeteringApi) Proxy.newProxyInstance(
+                TestMeteringApi.class.getClassLoader(),
+                new Class<?>[]{TestMeteringApi.class},
+                handler
+        );
+
+        List<String> result = proxy.getVolumes(LocalDate.of(2026, 10, 22));
+
+        assertThat(result).containsExactly("LOCAL_VOLUME_2026-10-22");
+        assertThat(localService.localCalls).isEqualTo(1);
+        mockServer.verify(); // No HTTP call because module override is 0.0
+        assertThat(registry.getTotalCount()).isEqualTo(0);
+
+        // Now test module override 1.0 when global is 0.0
+        properties.setShadowSampleRate(0.0);
+        route.setShadowSampleRate(1.0);
+
+        String remoteResponseJson = """
+                {
+                    "result": ["LOCAL_VOLUME_2026-10-22"],
+                    "durationMs": 10,
+                    "moduleName": "metering",
+                    "error": null
+                }
+                """;
+        mockServer.expect(requestTo("http://remote-worker:8080/internal/modulith-bridge/invoke"))
+                .andRespond(withSuccess(remoteResponseJson, org.springframework.http.MediaType.APPLICATION_JSON));
+
+        List<String> secondResult = proxy.getVolumes(LocalDate.of(2026, 10, 22));
+
+        assertThat(secondResult).containsExactly("LOCAL_VOLUME_2026-10-22");
+        mockServer.verify(); // HTTP call executed because module override is 1.0
+        assertThat(registry.getTotalCount()).isEqualTo(1);
+        assertThat(registry.getMatchCount()).isEqualTo(1);
+    }
+
     @Configuration
     static class PrunableMeteringConfig {
         @Bean

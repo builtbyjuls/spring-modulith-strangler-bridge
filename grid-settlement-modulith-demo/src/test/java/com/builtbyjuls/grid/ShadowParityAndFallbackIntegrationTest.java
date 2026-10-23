@@ -43,6 +43,7 @@ import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
 import com.builtbyjuls.strangler.report.DeploymentManifestGenerator;
 import com.builtbyjuls.strangler.report.StranglerReportExporter;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
+import com.builtbyjuls.strangler.transport.BridgeInvocationRequest;
 import com.builtbyjuls.strangler.transport.BridgeInvocationResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -270,6 +271,50 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
             config.setUrl(originalUrl);
             config.setFallbackToLocal(originalFallback);
         }
+    }
+
+    @Test
+    @DisplayName("Shadow mode write with X-Modulith-Shadow: true rolls back PostgreSQL insert while returning DTO")
+    void shouldRollbackDatabaseMutationInShadowMode() {
+        String testMeterCode = "MTR_SHADOW_ROLLBACK_TEST";
+        LocalDate testDate = LocalDate.of(2026, 4, 1);
+        BigDecimal testVolume = new BigDecimal("42.500000");
+
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                MeteringApi.class.getName(),
+                "recordMeterReading",
+                List.of("java.lang.String", "java.time.LocalDate", "java.math.BigDecimal"),
+                List.of(
+                        mapper.valueToTree(testMeterCode),
+                        mapper.valueToTree(testDate),
+                        mapper.valueToTree(testVolume)
+                )
+        );
+
+        BridgeHttpClient client = new BridgeHttpClient(RestClient.builder(), mapper);
+
+        // Invoke worker node with shadowMode=true (attaching X-Modulith-Shadow: true)
+        DailyMeterVolumeDto responseDto = (DailyMeterVolumeDto) client.invokeRemote(
+                "http://localhost:" + workerPort,
+                request,
+                DailyMeterVolumeDto.class,
+                5000L,
+                true
+        );
+
+        // Assert caller receives computed result DTO
+        assertThat(responseDto).isNotNull();
+        assertThat(responseDto.meterCode()).isEqualTo(testMeterCode);
+        assertThat(responseDto.readingDate()).isEqualTo(testDate);
+        assertThat(responseDto.totalActualMwh()).isEqualByComparingTo(testVolume);
+
+        // Assert database state: verify that no rows exist in PostgreSQL for testMeterCode
+        List<DailyMeterVolumeDto> persistedVolumes = meteringApi.aggregateDailyMeterVolumes(testDate);
+        boolean existsInDb = persistedVolumes.stream()
+                .anyMatch(v -> testMeterCode.equals(v.meterCode()));
+        assertThat(existsInDb).isFalse();
     }
 
     @Test

@@ -23,6 +23,7 @@ import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.slice.ModuleSliceEntityPostProcessor;
 import com.builtbyjuls.strangler.slice.ModuleSliceRegistryPostProcessor;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
+import com.builtbyjuls.strangler.transport.ModulithBridgeAdminController;
 import com.builtbyjuls.strangler.transport.ModulithBridgeInboundController;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -93,6 +94,17 @@ public class ModulithBridgeAutoConfiguration {
     ) {
         ObjectMapper mapper = objectMapperProvider.getIfAvailable();
         return new ModulithBridgeInboundController(applicationContext, moduleLayoutInspector, properties, mapper);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnWebApplication
+    public ModulithBridgeAdminController modulithBridgeAdminController(
+            ModulithBridgeProperties properties,
+            ObjectProvider<ObjectMapper> objectMapperProvider
+    ) {
+        ObjectMapper mapper = objectMapperProvider.getIfAvailable();
+        return new ModulithBridgeAdminController(properties, mapper);
     }
 
     @Bean

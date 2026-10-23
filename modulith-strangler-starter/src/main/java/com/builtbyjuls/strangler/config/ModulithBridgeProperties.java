@@ -1,7 +1,7 @@
 package com.builtbyjuls.strangler.config;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -62,9 +62,19 @@ public class ModulithBridgeProperties {
     private boolean validateContracts = true;
 
     /**
+     * Whether to execute write invocations inside a rollback-only transaction in shadow mode.
+     */
+    private boolean shadowRollbackWrites = true;
+
+    /**
+     * Global sampling rate for shadow mode invocations (0.0 to 1.0).
+     */
+    private double shadowSampleRate = 1.0;
+
+    /**
      * Per-module routing configurations.
      */
-    private Map<String, ModuleRouteConfig> modules = new LinkedHashMap<>();
+    private Map<String, ModuleRouteConfig> modules = new ConcurrentHashMap<>();
 
     public boolean isEnabled() {
         return enabled;
@@ -146,12 +156,28 @@ public class ModulithBridgeProperties {
         this.validateContracts = validateContracts;
     }
 
+    public boolean isShadowRollbackWrites() {
+        return shadowRollbackWrites;
+    }
+
+    public void setShadowRollbackWrites(boolean shadowRollbackWrites) {
+        this.shadowRollbackWrites = shadowRollbackWrites;
+    }
+
+    public double getShadowSampleRate() {
+        return shadowSampleRate;
+    }
+
+    public void setShadowSampleRate(double shadowSampleRate) {
+        this.shadowSampleRate = shadowSampleRate;
+    }
+
     public Map<String, ModuleRouteConfig> getModules() {
         return modules;
     }
 
     public void setModules(Map<String, ModuleRouteConfig> modules) {
-        this.modules = modules;
+        this.modules = (modules != null) ? new ConcurrentHashMap<>(modules) : new ConcurrentHashMap<>();
     }
 
     public static class ModuleRouteConfig {
@@ -159,22 +185,27 @@ public class ModulithBridgeProperties {
         /**
          * Routing mode for this module (LOCAL, SHADOW, REMOTE).
          */
-        private BridgeMode mode = BridgeMode.LOCAL;
+        private volatile BridgeMode mode = BridgeMode.LOCAL;
 
         /**
          * HTTP endpoint URL for remote calls.
          */
-        private String url;
+        private volatile String url;
 
         /**
          * Remote invocation timeout in milliseconds.
          */
-        private long timeoutMs = 5000L;
+        private volatile long timeoutMs = 5000L;
 
         /**
          * Whether to fallback to local execution if the remote invocation fails.
          */
-        private boolean fallbackToLocal = true;
+        private volatile boolean fallbackToLocal = true;
+
+        /**
+         * Optional per-module override for shadow sample rate (0.0 to 1.0).
+         */
+        private volatile Double shadowSampleRate;
 
         public BridgeMode getMode() {
             return mode;
@@ -206,6 +237,14 @@ public class ModulithBridgeProperties {
 
         public void setFallbackToLocal(boolean fallbackToLocal) {
             this.fallbackToLocal = fallbackToLocal;
+        }
+
+        public Double getShadowSampleRate() {
+            return shadowSampleRate;
+        }
+
+        public void setShadowSampleRate(Double shadowSampleRate) {
+            this.shadowSampleRate = shadowSampleRate;
         }
     }
 }

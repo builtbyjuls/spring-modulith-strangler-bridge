@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +19,9 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.ClassUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -25,6 +29,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import jakarta.persistence.EntityManager;
 
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
@@ -46,6 +52,7 @@ public class ModulithBridgeInboundController {
     private static final Logger log = LoggerFactory.getLogger(ModulithBridgeInboundController.class);
 
     public static final String SECRET_HEADER = "X-Modulith-Bridge-Secret";
+    public static final String SHADOW_HEADER = "X-Modulith-Shadow";
 
     private final ApplicationContext applicationContext;
     private final ModuleLayoutInspector inspector;
@@ -65,7 +72,11 @@ public class ModulithBridgeInboundController {
     }
 
     public ResponseEntity<String> invokeHttp(String rawRequestBody) {
-        return invokeHttp(rawRequestBody, null);
+        return invokeHttp(rawRequestBody, null, null);
+    }
+
+    public ResponseEntity<String> invokeHttp(String rawRequestBody, String providedSecret) {
+        return invokeHttp(rawRequestBody, providedSecret, null);
     }
 
     @PostMapping(
@@ -75,7 +86,8 @@ public class ModulithBridgeInboundController {
     )
     public ResponseEntity<String> invokeHttp(
             @RequestBody String rawRequestBody,
-            @RequestHeader(value = SECRET_HEADER, required = false) String providedSecret
+            @RequestHeader(value = SECRET_HEADER, required = false) String providedSecret,
+            @RequestHeader(value = SHADOW_HEADER, required = false) String shadowHeader
     ) {
         if (StringUtils.hasText(properties.getSecretToken())) {
             byte[] expected = properties.getSecretToken().getBytes(StandardCharsets.UTF_8);
@@ -108,7 +120,8 @@ public class ModulithBridgeInboundController {
             }
         }
 
-        ResponseEntity<BridgeInvocationResponse> responseEntity = invoke(request);
+        boolean shadowMode = "true".equalsIgnoreCase(shadowHeader);
+        ResponseEntity<BridgeInvocationResponse> responseEntity = invoke(request, shadowMode);
         try {
             String json = objectMapper.writeValueAsString(responseEntity.getBody());
             return ResponseEntity.status(responseEntity.getStatusCode())
@@ -121,10 +134,14 @@ public class ModulithBridgeInboundController {
     }
 
     public ResponseEntity<BridgeInvocationResponse> invoke(BridgeInvocationRequest request) {
+        return invoke(request, false);
+    }
+
+    public ResponseEntity<BridgeInvocationResponse> invoke(BridgeInvocationRequest request, boolean shadowMode) {
         Objects.requireNonNull(request, "request must not be null");
 
-        log.debug("Received inbound bridge invocation for module '{}', interface '{}', method '{}'",
-                request.moduleName(), request.interfaceName(), request.methodName());
+        log.debug("Received inbound bridge invocation for module '{}', interface '{}', method '{}' (shadowMode: {})",
+                request.moduleName(), request.interfaceName(), request.methodName(), shadowMode);
 
         Class<?> targetInterface = resolveInterface(request.interfaceName());
         if (targetInterface == null) {
@@ -177,7 +194,12 @@ public class ModulithBridgeInboundController {
 
         long start = System.currentTimeMillis();
         try {
-            Object result = targetMethod.invoke(unwrappedTarget, args);
+            Object result;
+            if (shadowMode && properties.isShadowRollbackWrites()) {
+                result = invokeWithRollback(targetMethod, unwrappedTarget, args);
+            } else {
+                result = targetMethod.invoke(unwrappedTarget, args);
+            }
             long durationMs = System.currentTimeMillis() - start;
             JsonNode resultNode = result != null ? objectMapper.valueToTree(result) : null;
             return ResponseEntity.ok(BridgeInvocationResponse.success(resultNode, durationMs, request.moduleName()));
@@ -200,6 +222,72 @@ public class ModulithBridgeInboundController {
             log.error("Invocation failure on module '{}': {}", request.moduleName(), ex.getMessage(), ex);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(BridgeInvocationResponse.error(ex.getMessage(), durationMs, request.moduleName()));
+        }
+    }
+
+    private Object invokeWithRollback(Method targetMethod, Object unwrappedTarget, Object[] args) throws Exception {
+        PlatformTransactionManager txManager = null;
+        try {
+            txManager = applicationContext.getBeanProvider(PlatformTransactionManager.class).getIfAvailable();
+        } catch (Throwable t) {
+            log.debug("PlatformTransactionManager lookup failed: {}", t.getMessage());
+        }
+
+        if (txManager == null) {
+            return targetMethod.invoke(unwrappedTarget, args);
+        }
+
+        TransactionTemplate txTemplate = new TransactionTemplate(txManager);
+        txTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        AtomicReference<InvocationTargetException> targetExceptionRef = new AtomicReference<>();
+        AtomicReference<Exception> otherExceptionRef = new AtomicReference<>();
+
+        Object result = txTemplate.execute(status -> {
+            try {
+                Object res = targetMethod.invoke(unwrappedTarget, args);
+                flushEntityManagerIfPresent();
+                return res;
+            } catch (InvocationTargetException ite) {
+                targetExceptionRef.set(ite);
+                return null;
+            } catch (Exception ex) {
+                otherExceptionRef.set(ex);
+                return null;
+            } finally {
+                status.setRollbackOnly();
+            }
+        });
+
+        if (targetExceptionRef.get() != null) {
+            throw targetExceptionRef.get();
+        }
+        if (otherExceptionRef.get() != null) {
+            throw otherExceptionRef.get();
+        }
+        return result;
+    }
+
+    private void flushEntityManagerIfPresent() {
+        try {
+            EntityManager em = applicationContext.getBeanProvider(EntityManager.class).getIfAvailable();
+            if (em != null) {
+                try {
+                    em.flush();
+                } catch (Exception ex) {
+                    if ("TransactionRequiredException".equals(ex.getClass().getSimpleName())) {
+                        log.debug("No active transaction on EntityManager for flush: {}", ex.getMessage());
+                    } else {
+                        throw ex;
+                    }
+                }
+            }
+        } catch (NoClassDefFoundError | Exception ex) {
+            if ("TransactionRequiredException".equals(ex.getClass().getSimpleName())) {
+                log.debug("No active transaction on EntityManager for flush: {}", ex.getMessage());
+            } else if (ex instanceof RuntimeException re) {
+                throw re;
+            }
         }
     }
 

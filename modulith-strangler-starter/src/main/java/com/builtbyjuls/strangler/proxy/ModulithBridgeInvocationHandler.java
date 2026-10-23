@@ -208,24 +208,35 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
         Object localResult = invokeLocal(method, args);
         long localDurationMs = System.currentTimeMillis() - startLocal;
 
+        ModulithBridgeProperties.ModuleRouteConfig cfg = properties.getModules() != null
+                ? properties.getModules().get(moduleName)
+                : null;
+        double sampleRate = (cfg != null && cfg.getShadowSampleRate() != null)
+                ? cfg.getShadowSampleRate()
+                : properties.getShadowSampleRate();
+
+        if (sampleRate <= 0.0 || (sampleRate < 1.0 && java.util.concurrent.ThreadLocalRandom.current().nextDouble() >= sampleRate)) {
+            return localResult;
+        }
+
         BridgeInvocationRequest request = createRequest(method, args);
         Type returnType = method.getGenericReturnType();
 
         Runnable shadowTask = () -> {
             long startRemote = System.currentTimeMillis();
             try {
-                ModulithBridgeProperties.ModuleRouteConfig cfg = properties.getModules() != null
+                ModulithBridgeProperties.ModuleRouteConfig activeCfg = properties.getModules() != null
                         ? properties.getModules().get(moduleName)
                         : null;
-                String url = cfg != null ? cfg.getUrl() : null;
+                String url = activeCfg != null ? activeCfg.getUrl() : null;
                 if (url == null || url.isBlank()) {
                     throw new IllegalStateException("Remote bridge URL is not configured for module '" + moduleName + "'");
                 }
                 if (httpClient == null) {
                     throw new IllegalStateException("BridgeHttpClient is not available in ModulithBridgeInvocationHandler");
                 }
-                long timeoutMs = cfg != null ? cfg.getTimeoutMs() : 5000L;
-                Object remoteResult = httpClient.invokeRemote(url, request, returnType, timeoutMs);
+                long timeoutMs = activeCfg != null ? activeCfg.getTimeoutMs() : 5000L;
+                Object remoteResult = httpClient.invokeRemote(url, request, returnType, timeoutMs, true);
                 long remoteDurationMs = System.currentTimeMillis() - startRemote;
 
                 ShadowParityVerifier.ParityOutcome outcome = verifier.verify(localResult, remoteResult);

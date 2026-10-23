@@ -59,10 +59,14 @@ public class BridgeHttpClient implements AutoCloseable {
     }
 
     public Object invokeRemote(String url, BridgeInvocationRequest request, Type returnType) {
-        return invokeRemote(url, request, returnType, 5000L);
+        return invokeRemote(url, request, returnType, 5000L, false);
     }
 
     public Object invokeRemote(String url, BridgeInvocationRequest request, Type returnType, long timeoutMs) {
+        return invokeRemote(url, request, returnType, timeoutMs, false);
+    }
+
+    public Object invokeRemote(String url, BridgeInvocationRequest request, Type returnType, long timeoutMs, boolean shadowMode) {
         Objects.requireNonNull(url, "url must not be null");
         Objects.requireNonNull(request, "request must not be null");
 
@@ -72,8 +76,8 @@ public class BridgeHttpClient implements AutoCloseable {
         }
         String endpoint = cleanUrl + INVOKE_PATH;
 
-        log.debug("Invoking remote bridge endpoint '{}' for module '{}', method '{}'",
-                endpoint, request.moduleName(), request.methodName());
+        log.debug("Invoking remote bridge endpoint '{}' for module '{}', method '{}' (shadowMode: {})",
+                endpoint, request.moduleName(), request.methodName(), shadowMode);
 
         BridgeInvocationResponse response;
         try {
@@ -85,6 +89,9 @@ public class BridgeHttpClient implements AutoCloseable {
                         .accept(MediaType.APPLICATION_JSON);
                 if (StringUtils.hasText(secretToken)) {
                     requestSpec.header(ModulithBridgeInboundController.SECRET_HEADER, secretToken);
+                }
+                if (shadowMode) {
+                    requestSpec.header(ModulithBridgeInboundController.SHADOW_HEADER, "true");
                 }
                 return requestSpec.body(requestJson)
                         .retrieve()

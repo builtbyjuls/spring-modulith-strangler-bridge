@@ -5,6 +5,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -13,6 +14,10 @@ import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.modulith.NamedInterface;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
 
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
@@ -348,5 +353,64 @@ class ModulithBridgeInboundControllerTest {
 
         assertThat(entity.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(entity.getBody().error()).contains("Cannot resolve interface");
+    }
+
+    @Test
+    @DisplayName("Inbound controller executes inside PROPAGATION_REQUIRES_NEW transaction and marks rollbackOnly when X-Modulith-Shadow is true")
+    void shouldExecuteInRollbackOnlyTransactionWhenShadowHeaderPresent() throws Exception {
+        AtomicBoolean requiresNewConfigured = new AtomicBoolean(false);
+        AtomicBoolean rollbackOnlyMarked = new AtomicBoolean(false);
+
+        PlatformTransactionManager txManager = new AbstractPlatformTransactionManager() {
+            @Override
+            protected Object doGetTransaction() {
+                return new Object();
+            }
+
+            @Override
+            protected void doBegin(Object transaction, TransactionDefinition definition) {
+                if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_REQUIRES_NEW) {
+                    requiresNewConfigured.set(true);
+                }
+            }
+
+            @Override
+            protected void doCommit(DefaultTransactionStatus status) {
+            }
+
+            @Override
+            protected void doRollback(DefaultTransactionStatus status) {
+                if (status.isRollbackOnly() || status.isLocalRollbackOnly()) {
+                    rollbackOnlyMarked.set(true);
+                }
+            }
+        };
+
+        SampleMeteringServiceImpl service = new SampleMeteringServiceImpl();
+        context.registerBean(PlatformTransactionManager.class, () -> txManager);
+        context.registerBean("sampleMeteringService", SampleMeteringApi.class, () -> service);
+        context.refresh();
+
+        this.controller = new ModulithBridgeInboundController(context, inspector, properties, objectMapper);
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                SampleMeteringApi.class.getName(),
+                "getVolumesForDate",
+                List.of("java.time.LocalDate", "int"),
+                List.of(
+                        objectMapper.valueToTree(LocalDate.of(2026, 10, 22)),
+                        objectMapper.valueToTree(3)
+                )
+        );
+        String requestJson = objectMapper.writeValueAsString(request);
+
+        ResponseEntity<String> response = controller.invokeHttp(requestJson, null, "true");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains("MTR_2026-10-22_3");
+        assertThat(service.callCount).isEqualTo(1);
+        assertThat(requiresNewConfigured.get()).isTrue();
+        assertThat(rollbackOnlyMarked.get()).isTrue();
     }
 }
