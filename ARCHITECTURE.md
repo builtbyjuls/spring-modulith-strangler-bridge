@@ -79,11 +79,14 @@ To allow the exact same JAR artifact to run either as the full monolith or as a 
   * **`LOCAL`**: Invokes `method.invoke(localTarget, args)` directly.
   * **`REMOTE`**: Dispatches a `BridgeInvocationRequest` (containing `moduleName`, `interfaceName`, `methodName`, `parameterTypes`, and serialized JSON arguments) via `BridgeHttpClient`. If `fallbackToLocal` is enabled and the remote call throws a transport exception, the handler logs the failure and invokes `localTarget`.
   * **`SHADOW`**: Executes `localTarget` synchronously to return the authoritative result, dispatches the remote request on a Virtual Thread (or synchronously when `shadowAwait=true` in deterministic tests), and passes both outputs to `ShadowParityVerifier`.
+* **Smart Error Classification**: When a remote bean throws a domain or validation exception (`InvocationTargetException`), the inbound controller flags the response as a `businessError`. `BridgeHttpClient` raises `BridgeBusinessException`, which `ModulithBridgeInvocationHandler` catches and immediately rethrows to the caller without triggering local fallback or recording fallback metrics. Local fallback is strictly reserved for infrastructure and transport failures (timeouts, connection refused, HTTP 5xx).
 
 ### 3.3 Inbound Bridge Adapter (`ModulithBridgeInboundController`)
 
 * **Reflective Method Resolution**: Exposes `POST /internal/modulith-bridge/invoke`. Resolves the target Spring bean by interface class and invokes the exact overloaded method matching `parameterTypes`.
 * **Typed Argument Deserialization**: Deserializes each JSON argument node against the target method's generic `Type` (`Method.getGenericParameterTypes()`) using Jackson `ObjectMapper` so collections, records, `LocalDate`, and `BigDecimal` values reconstruct accurately.
+* **Interface Whitelisting**: Verifies that the requested target is an interface annotated with `@NamedInterface` or `@ModulithBridgeTarget`. Invocations targeting unannotated interfaces or concrete classes are rejected with `HTTP 403 Forbidden`.
+* **Pre-Shared Secret Authentication**: When `modulith.bridge.secret-token` is configured, inbound invocations require a matching `X-Modulith-Bridge-Secret` header verified via constant-time comparison (`MessageDigest.isEqual`). Missing or invalid tokens return `HTTP 401 Unauthorized`. `BridgeHttpClient` automatically attaches this header to all outbound bridge requests.
 
 ### 3.4 Shadow Parity Verification (`ShadowParityVerifier`)
 
@@ -148,3 +151,5 @@ Wholesale electricity markets settle energy across **288 five-minute dispatch in
 | **Proxy Mechanism** | **JDK Dynamic Proxy** over `@NamedInterface` | Bytecode weaving (AspectJ / ByteBuddy) | **Why**: Aligns with Spring Modulith's interface-based module API design and works cleanly with Spring AOT.<br><br>**Trade-off**: Requires cross-module synchronous calls to go through a Java interface. |
 | **Transport Protocol** | **Spring `RestClient` + Jackson JSON** | Mandatory gRPC / `.proto` codegen | **Why**: Zero build-plugin or schema-compilation friction for Spring Boot developers.<br><br>**Trade-off**: Higher wire payload size than binary Protobuf. |
 | **Parity Comparison** | **Recursive `JsonNode` + `BigDecimal.compareTo()`** | `Objects.equals()` or raw JSON string comparison | **Why**: Avoids false mismatches caused by JSON key ordering or `BigDecimal` trailing zeros (`10.0` vs `10.000000`).<br><br>**Trade-off**: Incurs JSON tree conversion cost during `SHADOW` mode. |
+| **Error Fallback** | **Smart Error Classification** (`BridgeBusinessException`) | Blanket fallback to local on any error | **Why**: Prevents re-executing invalid domain mutations locally when remote validation legitimately fails.<br><br>**Trade-off**: Requires inbound controller and client to distinguish business exceptions from transport faults. |
+| **Bridge Security** | **Interface Whitelisting & Pre-Shared Secret** | Open reflective dispatch | **Why**: Protects inbound worker endpoints from unauthorized callers and arbitrary bean invocation.<br><br>**Trade-off**: Shared secret must be distributed to communicating services via environment or secret manager. |

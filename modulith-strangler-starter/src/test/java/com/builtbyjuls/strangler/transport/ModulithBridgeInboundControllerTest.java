@@ -30,6 +30,16 @@ class ModulithBridgeInboundControllerTest {
     private GenericApplicationContext context;
     private ModulithBridgeInboundController controller;
 
+    public interface UnannotatedInternalApi {
+        void doInternal();
+    }
+
+    public static class UnannotatedInternalServiceImpl implements UnannotatedInternalApi {
+        @Override
+        public void doInternal() {
+        }
+    }
+
     @NamedInterface("SampleMeteringApi")
     public interface SampleMeteringApi {
         List<String> getVolumesForDate(LocalDate date, int limit);
@@ -183,7 +193,7 @@ class ModulithBridgeInboundControllerTest {
     }
 
     @Test
-    @DisplayName("Inbound controller returns error in response when target method throws exception")
+    @DisplayName("Inbound controller returns businessError=true and exceptionType when target method throws exception")
     void shouldReturnErrorWhenMethodThrows() {
         SampleMeteringServiceImpl service = new SampleMeteringServiceImpl();
         context.registerBean("sampleMeteringService", SampleMeteringApi.class, () -> service);
@@ -205,6 +215,93 @@ class ModulithBridgeInboundControllerTest {
         BridgeInvocationResponse response = entity.getBody();
         assertThat(response).isNotNull();
         assertThat(response.error()).contains("Simulated domain calculation error");
+        assertThat(response.businessError()).isTrue();
+        assertThat(response.exceptionType()).isEqualTo("java.lang.IllegalStateException");
+    }
+
+    @Test
+    @DisplayName("Inbound controller rejects non-@NamedInterface target interface with 403 Forbidden")
+    void shouldReturnForbiddenWhenTargetIsNotNamedInterface() {
+        UnannotatedInternalServiceImpl service = new UnannotatedInternalServiceImpl();
+        context.registerBean("unannotatedService", UnannotatedInternalApi.class, () -> service);
+        context.refresh();
+
+        this.controller = new ModulithBridgeInboundController(context, inspector, properties, objectMapper);
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                UnannotatedInternalApi.class.getName(),
+                "doInternal",
+                List.of(),
+                List.of()
+        );
+
+        ResponseEntity<BridgeInvocationResponse> entity = controller.invoke(request);
+
+        assertThat(entity.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(entity.getBody()).isNotNull();
+        assertThat(entity.getBody().error())
+                .isEqualTo("Forbidden: target '" + UnannotatedInternalApi.class.getName() + "' is not a whitelisted @NamedInterface or @ModulithBridgeTarget");
+    }
+
+    @Test
+    @DisplayName("Inbound controller rejects concrete class target with 403 Forbidden")
+    void shouldReturnForbiddenWhenTargetIsConcreteClass() {
+        SampleMeteringServiceImpl service = new SampleMeteringServiceImpl();
+        context.registerBean("sampleMeteringService", SampleMeteringServiceImpl.class, () -> service);
+        context.refresh();
+
+        this.controller = new ModulithBridgeInboundController(context, inspector, properties, objectMapper);
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                SampleMeteringServiceImpl.class.getName(),
+                "performAction",
+                List.of("java.lang.String"),
+                List.of(objectMapper.valueToTree("SYNC"))
+        );
+
+        ResponseEntity<BridgeInvocationResponse> entity = controller.invoke(request);
+
+        assertThat(entity.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(entity.getBody()).isNotNull();
+        assertThat(entity.getBody().error())
+                .isEqualTo("Forbidden: target '" + SampleMeteringServiceImpl.class.getName() + "' is not a whitelisted @NamedInterface or @ModulithBridgeTarget");
+    }
+
+    @Test
+    @DisplayName("Inbound controller rejects missing or invalid secret token with 401 Unauthorized")
+    void shouldRejectMissingOrInvalidSecretTokenWithUnauthorized() throws Exception {
+        properties.setSecretToken("test-bridge-secret-123");
+        SampleMeteringServiceImpl service = new SampleMeteringServiceImpl();
+        context.registerBean("sampleMeteringService", SampleMeteringApi.class, () -> service);
+        context.refresh();
+
+        this.controller = new ModulithBridgeInboundController(context, inspector, properties, objectMapper);
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                SampleMeteringApi.class.getName(),
+                "performAction",
+                List.of("java.lang.String"),
+                List.of(objectMapper.valueToTree("ACTION"))
+        );
+        String requestJson = objectMapper.writeValueAsString(request);
+
+        // Missing secret header
+        ResponseEntity<String> missingSecretEntity = controller.invokeHttp(requestJson);
+        assertThat(missingSecretEntity.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(missingSecretEntity.getBody()).contains("Unauthorized bridge request: invalid or missing X-Modulith-Bridge-Secret");
+
+        // Wrong secret header
+        ResponseEntity<String> wrongSecretEntity = controller.invokeHttp(requestJson, "wrong-secret-token");
+        assertThat(wrongSecretEntity.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(wrongSecretEntity.getBody()).contains("Unauthorized bridge request: invalid or missing X-Modulith-Bridge-Secret");
+
+        // Valid secret header
+        ResponseEntity<String> validSecretEntity = controller.invokeHttp(requestJson, "test-bridge-secret-123");
+        assertThat(validSecretEntity.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(service.callCount).isEqualTo(1);
     }
 
     @Test

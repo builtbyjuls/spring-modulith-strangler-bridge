@@ -23,7 +23,8 @@ A reusable **Spring Boot 4.1 starter** (`modulith-strangler-starter`) that bring
 1. **Single-JAR Runtime Slicing (`host-only`)**: Starts a worker JVM with `--modulith.bridge.host-only=metering` and strips all bean definitions from other modules (`settlement`, `contract`) before singleton creation.
 2. **Zero-Code Proxy Routing (`LOCAL` / `SHADOW` / `REMOTE`)**: Wraps `@NamedInterface` beans in a dynamic proxy that switches between in-JVM calls and remote HTTP calls via `application.yml`.
 3. **Shadow Parity Verification**: Runs `LOCAL` as authority while calling `REMOTE` in parallel on a **Java 21 Virtual Thread**, comparing results with scale-normalized `BigDecimal` precision before full cutover.
-4. **Resilient Local Fallback**: Automatically falls back to the in-JVM implementation if the remote worker node times out during migration.
+4. **Resilient Fallback & Smart Error Classification**: Automatically falls back to the in-JVM implementation if the remote worker node times out during migration, while rethrowing legitimate domain exceptions directly to callers without fallback.
+5. **Inbound Whitelisting & Secret Authentication**: Restricts worker RPC endpoints to `@NamedInterface` contracts and validates pre-shared `X-Modulith-Bridge-Secret` tokens (`modulith.bridge.secret-token`).
 
 ---
 
@@ -74,7 +75,7 @@ When running a module in **`SHADOW`** mode during strangler migration, the start
 
 ## Repository Structure
 
-* **`modulith-strangler-starter/`**: Reusable **Spring Boot starter** containing `@EnableModulithBridge`, `ModuleSliceRegistryPostProcessor`, `ModuleSliceEntityPostProcessor`, `ModuleContractValidator`, `ModulithBridgeBeanPostProcessor`, `ModulithBridgeInboundController`, `ShadowParityVerifier`, `StranglerReportExporter`, and `DeploymentManifestGenerator`.
+* **`modulith-strangler-starter/`**: Reusable **Spring Boot starter** containing `@EnableModulithBridge`, `ModuleSliceRegistryPostProcessor`, `ModuleSliceEntityPostProcessor`, `ModuleContractValidator`, `ModulithBridgeBeanPostProcessor`, `ModulithBridgeInboundController`, `BridgeBusinessException`, `ShadowParityVerifier`, `StranglerReportExporter`, and `DeploymentManifestGenerator`.
 * **`grid-settlement-modulith-demo/`**: Wholesale **electricity market settlement modulith** modeling **288 daily 5-minute dispatch intervals** across `contract`, `metering`, and `settlement` modules.
 * **`Dockerfile`**, **`docker-compose.yml`**, **`k8s/manifests.yaml`**: Reference containerization and Kubernetes orchestration manifests for single-image worker extraction.
 * **`.github/workflows/ci.yml`**: GitHub Actions workflow running tests, uploading report artifacts, and publishing Markdown summaries to `$GITHUB_STEP_SUMMARY`.

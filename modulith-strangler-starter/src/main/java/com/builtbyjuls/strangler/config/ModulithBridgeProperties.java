@@ -27,6 +27,11 @@ public class ModulithBridgeProperties {
     private String hostOnly;
 
     /**
+     * Optional pre-shared secret token for inbound bridge authentication.
+     */
+    private String secretToken;
+
+    /**
      * In shadow mode, whether caller threads block awaiting remote execution.
      */
     private boolean shadowAwait = false;
@@ -83,6 +88,14 @@ public class ModulithBridgeProperties {
 
     public void setHostOnly(String hostOnly) {
         this.hostOnly = hostOnly;
+    }
+
+    public String getSecretToken() {
+        return secretToken;
+    }
+
+    public void setSecretToken(String secretToken) {
+        this.secretToken = secretToken;
     }
 
     public boolean isShadowAwait() {

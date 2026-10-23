@@ -17,6 +17,7 @@ import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
 import com.builtbyjuls.strangler.parity.ShadowParityResult;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
+import com.builtbyjuls.strangler.transport.BridgeBusinessException;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.builtbyjuls.strangler.transport.BridgeInvocationRequest;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -171,6 +172,8 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
         long startRemote = System.currentTimeMillis();
         try {
             return httpClient.invokeRemote(url, request, returnType, timeoutMs);
+        } catch (BridgeBusinessException bbe) {
+            throw bbe;
         } catch (Exception ex) {
             long remoteDurationMs = System.currentTimeMillis() - startRemote;
             if (fallbackToLocal && localTarget != null) {

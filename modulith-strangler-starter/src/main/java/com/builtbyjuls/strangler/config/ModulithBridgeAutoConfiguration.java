@@ -73,11 +73,13 @@ public class ModulithBridgeAutoConfiguration {
     @ConditionalOnMissingBean
     public BridgeHttpClient bridgeHttpClient(
             ObjectProvider<RestClient.Builder> restClientBuilderProvider,
-            ObjectProvider<ObjectMapper> objectMapperProvider
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            ObjectProvider<ModulithBridgeProperties> propertiesProvider
     ) {
         RestClient.Builder builder = restClientBuilderProvider.getIfAvailable(RestClient::builder);
         ObjectMapper mapper = objectMapperProvider.getIfAvailable();
-        return new BridgeHttpClient(builder, mapper);
+        ModulithBridgeProperties properties = propertiesProvider.getIfAvailable();
+        return new BridgeHttpClient(builder, mapper, properties);
     }
 
     @Bean

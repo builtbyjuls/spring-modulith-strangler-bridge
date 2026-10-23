@@ -23,6 +23,7 @@ import com.builtbyjuls.strangler.parity.ShadowParityResult;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.slice.ModuleSliceRegistryPostProcessor;
+import com.builtbyjuls.strangler.transport.BridgeBusinessException;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -177,6 +178,62 @@ class ModulithBridgeProxyTest {
 
         assertThat(result).containsExactly("LOCAL_VOLUME_2026-10-22");
         assertThat(localService.localCalls).isEqualTo(1);
+        mockServer.verify();
+    }
+
+    @Test
+    @DisplayName("REMOTE mode rethrows BridgeBusinessException immediately without invoking local fallback or incrementing fallback count")
+    void shouldRethrowBridgeBusinessExceptionImmediatelyWithoutFallback() {
+        ModulithBridgeProperties.ModuleRouteConfig route = new ModulithBridgeProperties.ModuleRouteConfig();
+        route.setMode(BridgeMode.REMOTE);
+        route.setUrl("http://remote-worker:8080");
+        route.setFallbackToLocal(true);
+        properties.getModules().put("metering", route);
+
+        String businessErrorJson = """
+                {
+                    "result": null,
+                    "durationMs": 10,
+                    "moduleName": "metering",
+                    "error": "Contract interval readings invalid",
+                    "businessError": true,
+                    "exceptionType": "java.lang.IllegalArgumentException"
+                }
+                """;
+
+        mockServer.expect(requestTo("http://remote-worker:8080/internal/modulith-bridge/invoke"))
+                .andRespond(withSuccess(businessErrorJson, org.springframework.http.MediaType.APPLICATION_JSON));
+
+        LocalMeteringService localService = new LocalMeteringService();
+        ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
+                localService,
+                "metering",
+                TestMeteringApi.class,
+                properties,
+                httpClient,
+                objectMapper,
+                verifier,
+                registry
+        );
+
+        TestMeteringApi proxy = (TestMeteringApi) Proxy.newProxyInstance(
+                TestMeteringApi.class.getClassLoader(),
+                new Class<?>[]{TestMeteringApi.class},
+                handler
+        );
+
+        LocalDate date = LocalDate.of(2026, 10, 22);
+        assertThatThrownBy(() -> proxy.getVolumes(date))
+                .isInstanceOf(BridgeBusinessException.class)
+                .satisfies(ex -> {
+                    BridgeBusinessException bbe = (BridgeBusinessException) ex;
+                    assertThat(bbe.getModuleName()).isEqualTo("metering");
+                    assertThat(bbe.getExceptionType()).isEqualTo("java.lang.IllegalArgumentException");
+                    assertThat(bbe.getRemoteMessage()).isEqualTo("Contract interval readings invalid");
+                });
+
+        assertThat(localService.localCalls).isEqualTo(0);
+        assertThat(registry.getFallbackCount()).isEqualTo(0);
         mockServer.verify();
     }
 

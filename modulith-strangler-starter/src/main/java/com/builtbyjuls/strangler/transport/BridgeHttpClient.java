@@ -12,8 +12,10 @@ import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
+import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
+import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -30,16 +32,30 @@ public class BridgeHttpClient implements AutoCloseable {
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final ExecutorService virtualThreadExecutor;
+    private final String secretToken;
 
     public BridgeHttpClient() {
-        this(RestClient.builder(), createDefaultObjectMapper());
+        this(RestClient.builder(), createDefaultObjectMapper(), (String) null);
     }
 
     public BridgeHttpClient(RestClient.Builder restClientBuilder, ObjectMapper objectMapper) {
+        this(restClientBuilder, objectMapper, (String) null);
+    }
+
+    public BridgeHttpClient(RestClient.Builder restClientBuilder, ObjectMapper objectMapper, ModulithBridgeProperties properties) {
+        this(restClientBuilder, objectMapper, properties != null ? properties.getSecretToken() : null);
+    }
+
+    public BridgeHttpClient(RestClient.Builder restClientBuilder, ObjectMapper objectMapper, String secretToken) {
         RestClient.Builder builder = restClientBuilder != null ? restClientBuilder : RestClient.builder();
         this.objectMapper = objectMapper != null ? objectMapper : createDefaultObjectMapper();
+        this.secretToken = secretToken;
         this.restClient = builder.build();
         this.virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    }
+
+    public String getSecretToken() {
+        return secretToken;
     }
 
     public Object invokeRemote(String url, BridgeInvocationRequest request, Type returnType) {
@@ -63,11 +79,14 @@ public class BridgeHttpClient implements AutoCloseable {
         try {
             String requestJson = objectMapper.writeValueAsString(request);
             CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
-                return restClient.post()
+                RestClient.RequestBodySpec requestSpec = restClient.post()
                         .uri(endpoint)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .accept(MediaType.APPLICATION_JSON)
-                        .body(requestJson)
+                        .accept(MediaType.APPLICATION_JSON);
+                if (StringUtils.hasText(secretToken)) {
+                    requestSpec.header(ModulithBridgeInboundController.SECRET_HEADER, secretToken);
+                }
+                return requestSpec.body(requestJson)
                         .retrieve()
                         .body(String.class);
             }, virtualThreadExecutor);
@@ -113,6 +132,13 @@ public class BridgeHttpClient implements AutoCloseable {
         }
 
         if (response.error() != null) {
+            if (response.businessError()) {
+                throw new BridgeBusinessException(
+                        response.moduleName(),
+                        response.exceptionType(),
+                        response.error()
+                );
+            }
             throw new BridgeRemoteInvocationException(
                     "Remote bridge invocation failed on module '" + response.moduleName() + "': " + response.error()
             );

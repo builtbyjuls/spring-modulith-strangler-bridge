@@ -52,6 +52,7 @@ class RemoteExtractedModuleIntegrationTest extends PostgreSqlTestContainerBase {
     @DynamicPropertySource
     static void configureRemoteBridge(DynamicPropertyRegistry registry) {
         startWorkerNode();
+        registry.add("modulith.bridge.secret-token", () -> "grid-secret-2026");
         registry.add("modulith.bridge.modules.metering.mode", () -> "REMOTE");
         registry.add("modulith.bridge.modules.metering.url", () -> "http://localhost:" + workerPort);
     }
@@ -63,6 +64,7 @@ class RemoteExtractedModuleIntegrationTest extends PostgreSqlTestContainerBase {
                     .properties(
                             "server.port=0",
                             "modulith.bridge.host-only=metering",
+                            "modulith.bridge.secret-token=grid-secret-2026",
                             "spring.datasource.url=" + postgres.getJdbcUrl(),
                             "spring.datasource.username=" + postgres.getUsername(),
                             "spring.datasource.password=" + postgres.getPassword(),

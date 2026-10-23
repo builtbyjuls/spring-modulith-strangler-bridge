@@ -5,6 +5,8 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.lang.reflect.Type;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -20,6 +22,7 @@ import org.springframework.util.ClassUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -42,6 +45,8 @@ public class ModulithBridgeInboundController {
 
     private static final Logger log = LoggerFactory.getLogger(ModulithBridgeInboundController.class);
 
+    public static final String SECRET_HEADER = "X-Modulith-Bridge-Secret";
+
     private final ApplicationContext applicationContext;
     private final ModuleLayoutInspector inspector;
     private final ModulithBridgeProperties properties;
@@ -59,12 +64,35 @@ public class ModulithBridgeInboundController {
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper().registerModule(new JavaTimeModule());
     }
 
+    public ResponseEntity<String> invokeHttp(String rawRequestBody) {
+        return invokeHttp(rawRequestBody, null);
+    }
+
     @PostMapping(
             value = "/invoke",
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE
     )
-    public ResponseEntity<String> invokeHttp(@RequestBody String rawRequestBody) {
+    public ResponseEntity<String> invokeHttp(
+            @RequestBody String rawRequestBody,
+            @RequestHeader(value = SECRET_HEADER, required = false) String providedSecret
+    ) {
+        if (StringUtils.hasText(properties.getSecretToken())) {
+            byte[] expected = properties.getSecretToken().getBytes(StandardCharsets.UTF_8);
+            byte[] actual = providedSecret != null ? providedSecret.getBytes(StandardCharsets.UTF_8) : new byte[0];
+            if (providedSecret == null || !MessageDigest.isEqual(expected, actual)) {
+                String err = "Unauthorized bridge request: invalid or missing " + SECRET_HEADER;
+                log.warn(err);
+                try {
+                    return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(objectMapper.writeValueAsString(BridgeInvocationResponse.error(err, 0, "unknown")));
+                } catch (Exception ignored) {
+                    return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+                }
+            }
+        }
+
         BridgeInvocationRequest request;
         try {
             request = objectMapper.readValue(rawRequestBody, BridgeInvocationRequest.class);
@@ -103,6 +131,13 @@ public class ModulithBridgeInboundController {
             String err = "Cannot resolve interface: " + request.interfaceName();
             log.error(err);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(BridgeInvocationResponse.error(err, 0, request.moduleName()));
+        }
+
+        if (!targetInterface.isInterface() || !inspector.isModuleApi(targetInterface)) {
+            String err = "Forbidden: target '" + request.interfaceName() + "' is not a whitelisted @NamedInterface or @ModulithBridgeTarget";
+            log.warn(err);
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(BridgeInvocationResponse.error(err, 0, request.moduleName()));
         }
 
@@ -154,7 +189,12 @@ public class ModulithBridgeInboundController {
                     : cause.toString();
             log.error("Execution exception in method '{}' of module '{}': {}",
                     targetMethod.getName(), request.moduleName(), errorMsg);
-            return ResponseEntity.ok(BridgeInvocationResponse.error(errorMsg, durationMs, request.moduleName()));
+            return ResponseEntity.ok(BridgeInvocationResponse.businessError(
+                    errorMsg,
+                    cause.getClass().getName(),
+                    durationMs,
+                    request.moduleName()
+            ));
         } catch (Exception ex) {
             long durationMs = System.currentTimeMillis() - start;
             log.error("Invocation failure on module '{}': {}", request.moduleName(), ex.getMessage(), ex);

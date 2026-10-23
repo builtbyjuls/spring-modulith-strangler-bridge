@@ -165,4 +165,69 @@ class BridgeHttpClientTest {
             latch.countDown();
         }
     }
+
+    @Test
+    @DisplayName("BridgeHttpClient attaches X-Modulith-Bridge-Secret header when secretToken is configured")
+    void shouldAttachSecretHeaderWhenConfigured() {
+        BridgeHttpClient clientWithSecret = new BridgeHttpClient(restClientBuilder, objectMapper, "my-auth-secret-xyz");
+        String responseJson = """
+                {
+                    "result": null,
+                    "durationMs": 5,
+                    "moduleName": "metering",
+                    "error": null
+                }
+                """;
+
+        mockServer.expect(requestTo("http://worker-node:8080/internal/modulith-bridge/invoke"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header("X-Modulith-Bridge-Secret", "my-auth-secret-xyz"))
+                .andRespond(withSuccess(responseJson, MediaType.APPLICATION_JSON));
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                "com.example.MeteringApi",
+                "sync",
+                List.of(),
+                List.of()
+        );
+
+        clientWithSecret.invokeRemote("http://worker-node:8080", request, void.class, 5000L);
+        mockServer.verify();
+    }
+
+    @Test
+    @DisplayName("BridgeHttpClient throws BridgeBusinessException when response has businessError=true")
+    void shouldThrowBridgeBusinessExceptionWhenResponseIsBusinessError() {
+        String responseJson = """
+                {
+                    "result": null,
+                    "durationMs": 8,
+                    "moduleName": "metering",
+                    "error": "Contract interval reading mismatch",
+                    "businessError": true,
+                    "exceptionType": "java.lang.IllegalArgumentException"
+                }
+                """;
+
+        mockServer.expect(requestTo("http://worker-node:8080/internal/modulith-bridge/invoke"))
+                .andRespond(withSuccess(responseJson, MediaType.APPLICATION_JSON));
+
+        BridgeInvocationRequest request = new BridgeInvocationRequest(
+                "metering",
+                "com.example.MeteringApi",
+                "getVolumes",
+                List.of(),
+                List.of()
+        );
+
+        assertThatThrownBy(() -> httpClient.invokeRemote("http://worker-node:8080", request, String.class, 5000L))
+                .isInstanceOf(BridgeBusinessException.class)
+                .satisfies(ex -> {
+                    BridgeBusinessException bbe = (BridgeBusinessException) ex;
+                    assertThat(bbe.getModuleName()).isEqualTo("metering");
+                    assertThat(bbe.getExceptionType()).isEqualTo("java.lang.IllegalArgumentException");
+                    assertThat(bbe.getRemoteMessage()).isEqualTo("Contract interval reading mismatch");
+                });
+    }
 }

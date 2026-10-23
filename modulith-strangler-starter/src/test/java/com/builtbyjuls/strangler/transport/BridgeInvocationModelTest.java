@@ -69,5 +69,23 @@ class BridgeInvocationModelTest {
 
         assertThat(deserializedError.result()).isNull();
         assertThat(deserializedError.error()).isEqualTo("Module timeout exceeded");
+        assertThat(deserializedError.businessError()).isFalse();
+        assertThat(deserializedError.exceptionType()).isNull();
+
+        BridgeInvocationResponse businessErr = BridgeInvocationResponse.businessError(
+                "Invalid dispatch interval count",
+                "java.lang.IllegalArgumentException",
+                25L,
+                "metering"
+        );
+        String businessJson = objectMapper.writeValueAsString(businessErr);
+        BridgeInvocationResponse deserializedBusiness = objectMapper.readValue(businessJson, BridgeInvocationResponse.class);
+
+        assertThat(deserializedBusiness.result()).isNull();
+        assertThat(deserializedBusiness.error()).isEqualTo("Invalid dispatch interval count");
+        assertThat(deserializedBusiness.businessError()).isTrue();
+        assertThat(deserializedBusiness.exceptionType()).isEqualTo("java.lang.IllegalArgumentException");
+        assertThat(deserializedBusiness.durationMs()).isEqualTo(25L);
+        assertThat(deserializedBusiness.moduleName()).isEqualTo("metering");
     }
 }
