@@ -32,32 +32,23 @@ A reusable **Spring Boot 4.1 starter** (`modulith-strangler-starter`) that bring
 
 ---
 
-## Sequence Flow
+## Architecture Flow
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant Caller as SettlementModule (Main JVM)
-    participant Proxy as ModulithBridge Proxy (MeteringApi)
-    participant Local as Local MeteringService
-    participant Worker as Extracted Metering JVM (host-only=metering)
-    participant Verifier as ShadowParityVerifier
+flowchart TD
+    Caller["Caller Module (Main JVM)"] --> Proxy{"@NamedInterface Proxy"}
 
-    Caller->>Proxy: aggregateDailyMeterVolumes(tradingDate)
-    alt Mode == LOCAL
-        Proxy->>Local: Direct Java Method Call
-        Local-->>Caller: List<DailyMeterVolumeDto>
-    else Mode == SHADOW
-        par Local Authority & Remote Shadow (Virtual Thread)
-            Proxy->>Local: Direct Java Method Call
-            Proxy->>Worker: POST /internal/modulith-bridge/invoke
-        end
-        Verifier->>Verifier: Compare JSON & BigDecimal Scale Parity
-        Local-->>Caller: Return Authoritative Result
-    else Mode == REMOTE
-        Proxy->>Worker: POST /internal/modulith-bridge/invoke
-        Worker-->>Caller: List<DailyMeterVolumeDto> (or Local Fallback)
-    end
+    Proxy -- "LOCAL" --> Local["In-JVM Target Bean"]
+    Local --> Return["Return Result to Caller"]
+
+    Proxy -- "SHADOW" --> ShadowLocal["Execute Local Bean (Authority)"]
+    ShadowLocal --> Return
+    Proxy -. "Virtual Thread (X-Modulith-Shadow: true)" .-> Worker["Extracted Worker JVM (host-only)"]
+    Worker -.-> Verifier["ShadowParityVerifier (BigDecimal Scale Diff)"]
+
+    Proxy -- "REMOTE" --> WorkerRemote["Extracted Worker JVM (HTTP POST)"]
+    WorkerRemote -- "200 OK" --> Return
+    WorkerRemote -. "Transport Timeout (fallback=true)" .-> Local
 ```
 
 ---
