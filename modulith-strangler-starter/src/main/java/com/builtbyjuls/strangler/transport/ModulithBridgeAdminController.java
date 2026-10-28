@@ -44,8 +44,13 @@ public class ModulithBridgeAdminController {
             String url,
             Long timeoutMs,
             Boolean fallbackToLocal,
-            Double shadowSampleRate
-    ) {}
+            Double shadowSampleRate,
+            Double remotePercentage
+    ) {
+        public RouteUpdateRequest(BridgeMode mode, String url, Long timeoutMs, Boolean fallbackToLocal, Double shadowSampleRate) {
+            this(mode, url, timeoutMs, fallbackToLocal, shadowSampleRate, null);
+        }
+    }
 
     public ResponseEntity<Map<String, ModulithBridgeProperties.ModuleRouteConfig>> getRoutes() {
         return getRoutes(null);
@@ -107,11 +112,14 @@ public class ModulithBridgeAdminController {
                 if (updateRequest.shadowSampleRate() != null) {
                     config.setShadowSampleRate(updateRequest.shadowSampleRate());
                 }
+                if (updateRequest.remotePercentage() != null) {
+                    config.setRemotePercentage(updateRequest.remotePercentage());
+                }
             }
         }
 
-        log.info("Updated route for module '{}': mode={}, url={}, timeoutMs={}, fallbackToLocal={}, shadowSampleRate={}",
-                key, config.getMode(), config.getUrl(), config.getTimeoutMs(), config.isFallbackToLocal(), config.getShadowSampleRate());
+        log.info("Updated route for module '{}': mode={}, url={}, timeoutMs={}, fallbackToLocal={}, shadowSampleRate={}, remotePercentage={}",
+                key, config.getMode(), config.getUrl(), config.getTimeoutMs(), config.isFallbackToLocal(), config.getShadowSampleRate(), config.getRemotePercentage());
 
         return ResponseEntity.ok(config);
     }

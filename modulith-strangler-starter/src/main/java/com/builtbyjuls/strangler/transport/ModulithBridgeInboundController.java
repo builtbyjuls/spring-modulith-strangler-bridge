@@ -35,6 +35,8 @@ import jakarta.persistence.EntityManager;
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
+import com.builtbyjuls.strangler.trace.BridgeTraceContext;
+import com.builtbyjuls.strangler.trace.BridgeTraceContextHolder;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -79,6 +81,10 @@ public class ModulithBridgeInboundController {
         return invokeHttp(rawRequestBody, providedSecret, null);
     }
 
+    public ResponseEntity<String> invokeHttp(String rawRequestBody, String providedSecret, String shadowHeader) {
+        return invokeHttp(rawRequestBody, providedSecret, shadowHeader, null, null, null, null);
+    }
+
     @PostMapping(
             value = "/invoke",
             consumes = MediaType.APPLICATION_JSON_VALUE,
@@ -87,7 +93,11 @@ public class ModulithBridgeInboundController {
     public ResponseEntity<String> invokeHttp(
             @RequestBody String rawRequestBody,
             @RequestHeader(value = SECRET_HEADER, required = false) String providedSecret,
-            @RequestHeader(value = SHADOW_HEADER, required = false) String shadowHeader
+            @RequestHeader(value = SHADOW_HEADER, required = false) String shadowHeader,
+            @RequestHeader(value = BridgeTraceContextHolder.TRACEPARENT_HEADER, required = false) String traceparent,
+            @RequestHeader(value = BridgeTraceContextHolder.TRACESTATE_HEADER, required = false) String tracestate,
+            @RequestHeader(value = BridgeTraceContextHolder.BAGGAGE_HEADER, required = false) String baggage,
+            @RequestHeader(value = BridgeTraceContextHolder.CORRELATION_ID_HEADER, required = false) String correlationId
     ) {
         if (StringUtils.hasText(properties.getSecretToken())) {
             byte[] expected = properties.getSecretToken().getBytes(StandardCharsets.UTF_8);
@@ -121,7 +131,17 @@ public class ModulithBridgeInboundController {
         }
 
         boolean shadowMode = "true".equalsIgnoreCase(shadowHeader);
-        ResponseEntity<BridgeInvocationResponse> responseEntity = invoke(request, shadowMode);
+        BridgeTraceContext inboundContext = properties.isPropagateTraceContext()
+                ? new BridgeTraceContext(traceparent, tracestate, baggage, correlationId)
+                : null;
+
+        ResponseEntity<BridgeInvocationResponse> responseEntity;
+        try (BridgeTraceContextHolder.Scope ignored = inboundContext != null
+                ? BridgeTraceContextHolder.openScope(inboundContext)
+                : BridgeTraceContextHolder.Scope.NOOP) {
+            responseEntity = invoke(request, shadowMode);
+        }
+
         try {
             String json = objectMapper.writeValueAsString(responseEntity.getBody());
             return ResponseEntity.status(responseEntity.getStatusCode())

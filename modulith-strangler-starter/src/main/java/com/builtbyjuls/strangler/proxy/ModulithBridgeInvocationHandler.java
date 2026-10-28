@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +20,8 @@ import com.builtbyjuls.strangler.parity.ShadowParityResult;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.resilience.BridgeCallBudgetGuard;
 import com.builtbyjuls.strangler.resilience.BridgeCircuitBreaker;
+import com.builtbyjuls.strangler.trace.BridgeTraceContext;
+import com.builtbyjuls.strangler.trace.BridgeTraceContextHolder;
 import com.builtbyjuls.strangler.transport.BridgeBusinessException;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.builtbyjuls.strangler.transport.BridgeInvocationRequest;
@@ -149,6 +152,31 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
             return invokeShadow(method, args);
         }
 
+        if (mode == BridgeMode.CANARY) {
+            return invokeCanary(method, args);
+        }
+
+        return invokeLocal(method, args);
+    }
+
+    private Object invokeCanary(Method method, Object[] args) throws Throwable {
+        ModulithBridgeProperties.ModuleRouteConfig cfg = properties.getModules() != null
+                ? properties.getModules().get(moduleName)
+                : null;
+        double remotePercentage = (cfg != null && cfg.getRemotePercentage() != null)
+                ? cfg.getRemotePercentage()
+                : properties.getRemotePercentage();
+
+        if (remotePercentage <= 0.0) {
+            return invokeLocal(method, args);
+        }
+        if (remotePercentage >= 100.0) {
+            return invokeRemote(method, args);
+        }
+
+        if (ThreadLocalRandom.current().nextDouble(100.0) < remotePercentage) {
+            return invokeRemote(method, args);
+        }
         return invokeLocal(method, args);
     }
 
@@ -284,60 +312,68 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
         BridgeInvocationRequest request = createRequest(method, args);
         Type returnType = method.getGenericReturnType();
 
+        BridgeTraceContext parentContext = properties.isPropagateTraceContext()
+                ? BridgeTraceContextHolder.captureForOutbound()
+                : null;
+
         Runnable shadowTask = () -> {
-            long startRemote = System.currentTimeMillis();
-            try {
-                ModulithBridgeProperties.ModuleRouteConfig activeCfg = properties.getModules() != null
-                        ? properties.getModules().get(moduleName)
-                        : null;
-                String url = activeCfg != null ? activeCfg.getUrl() : null;
-                if (url == null || url.isBlank()) {
-                    throw new IllegalStateException("Remote bridge URL is not configured for module '" + moduleName + "'");
-                }
-                if (httpClient == null) {
-                    throw new IllegalStateException("BridgeHttpClient is not available in ModulithBridgeInvocationHandler");
-                }
-                long timeoutMs = activeCfg != null ? activeCfg.getTimeoutMs() : 5000L;
-                Object remoteResult = httpClient.invokeRemote(url, request, returnType, timeoutMs, true);
-                long remoteDurationMs = System.currentTimeMillis() - startRemote;
+            try (BridgeTraceContextHolder.Scope ignored = parentContext != null
+                    ? BridgeTraceContextHolder.openScope(parentContext)
+                    : BridgeTraceContextHolder.Scope.NOOP) {
+                long startRemote = System.currentTimeMillis();
+                try {
+                    ModulithBridgeProperties.ModuleRouteConfig activeCfg = properties.getModules() != null
+                            ? properties.getModules().get(moduleName)
+                            : null;
+                    String url = activeCfg != null ? activeCfg.getUrl() : null;
+                    if (url == null || url.isBlank()) {
+                        throw new IllegalStateException("Remote bridge URL is not configured for module '" + moduleName + "'");
+                    }
+                    if (httpClient == null) {
+                        throw new IllegalStateException("BridgeHttpClient is not available in ModulithBridgeInvocationHandler");
+                    }
+                    long timeoutMs = activeCfg != null ? activeCfg.getTimeoutMs() : 5000L;
+                    Object remoteResult = httpClient.invokeRemote(url, request, returnType, timeoutMs, true);
+                    long remoteDurationMs = System.currentTimeMillis() - startRemote;
 
-                ShadowParityVerifier.ParityOutcome outcome = verifier.verify(localResult, remoteResult);
-                if (!outcome.matched()) {
-                    log.warn("Shadow parity mismatch for module '{}', method '{}': {}",
-                            moduleName, method.getName(), outcome.diffSummary());
-                }
+                    ShadowParityVerifier.ParityOutcome outcome = verifier.verify(localResult, remoteResult);
+                    if (!outcome.matched()) {
+                        log.warn("Shadow parity mismatch for module '{}', method '{}': {}",
+                                moduleName, method.getName(), outcome.diffSummary());
+                    }
 
-                if (registry != null) {
-                    registry.record(new ShadowParityResult(
-                            moduleName,
-                            targetInterface.getName(),
-                            method.getName(),
-                            outcome.matched(),
-                            localDurationMs,
-                            remoteDurationMs,
-                            outcome.diffSummary(),
-                            null,
-                            false
-                    ));
-                }
-            } catch (Throwable t) {
-                long remoteDurationMs = System.currentTimeMillis() - startRemote;
-                String errorMsg = t.getMessage() != null ? t.getMessage() : t.toString();
-                log.warn("Shadow remote call failed for module '{}', method '{}': {}",
-                        moduleName, method.getName(), errorMsg);
+                    if (registry != null) {
+                        registry.record(new ShadowParityResult(
+                                moduleName,
+                                targetInterface.getName(),
+                                method.getName(),
+                                outcome.matched(),
+                                localDurationMs,
+                                remoteDurationMs,
+                                outcome.diffSummary(),
+                                null,
+                                false
+                        ));
+                    }
+                } catch (Throwable t) {
+                    long remoteDurationMs = System.currentTimeMillis() - startRemote;
+                    String errorMsg = t.getMessage() != null ? t.getMessage() : t.toString();
+                    log.warn("Shadow remote call failed for module '{}', method '{}': {}",
+                            moduleName, method.getName(), errorMsg);
 
-                if (registry != null) {
-                    registry.record(new ShadowParityResult(
-                            moduleName,
-                            targetInterface.getName(),
-                            method.getName(),
-                            false,
-                            localDurationMs,
-                            remoteDurationMs,
-                            "Remote execution failed: " + errorMsg,
-                            errorMsg,
-                            true
-                    ));
+                    if (registry != null) {
+                        registry.record(new ShadowParityResult(
+                                moduleName,
+                                targetInterface.getName(),
+                                method.getName(),
+                                false,
+                                localDurationMs,
+                                remoteDurationMs,
+                                "Remote execution failed: " + errorMsg,
+                                errorMsg,
+                                true
+                        ));
+                    }
                 }
             }
         };

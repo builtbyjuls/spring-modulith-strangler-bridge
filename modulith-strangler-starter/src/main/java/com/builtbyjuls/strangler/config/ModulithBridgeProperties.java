@@ -72,6 +72,16 @@ public class ModulithBridgeProperties {
     private double shadowSampleRate = 1.0;
 
     /**
+     * Percentage of traffic routed remotely when in CANARY mode (0.0 to 100.0).
+     */
+    private double remotePercentage = 0.0;
+
+    /**
+     * Whether to propagate W3C distributed trace context and correlation identifiers across bridge calls.
+     */
+    private boolean propagateTraceContext = true;
+
+    /**
      * Maximum invocations permitted per thread within callWindowMs before triggering chatty loop detection.
      * Values <= 0 disable chatty loop detection.
      */
@@ -199,6 +209,22 @@ public class ModulithBridgeProperties {
         this.shadowSampleRate = shadowSampleRate;
     }
 
+    public double getRemotePercentage() {
+        return remotePercentage;
+    }
+
+    public void setRemotePercentage(double remotePercentage) {
+        this.remotePercentage = remotePercentage;
+    }
+
+    public boolean isPropagateTraceContext() {
+        return propagateTraceContext;
+    }
+
+    public void setPropagateTraceContext(boolean propagateTraceContext) {
+        this.propagateTraceContext = propagateTraceContext;
+    }
+
     public int getMaxCallsPerWindow() {
         return maxCallsPerWindow;
     }
@@ -274,6 +300,11 @@ public class ModulithBridgeProperties {
          */
         private volatile Double shadowSampleRate;
 
+        /**
+         * Optional per-module override for canary remote traffic percentage (0.0 to 100.0).
+         */
+        private volatile Double remotePercentage;
+
         public BridgeMode getMode() {
             return mode;
         }
@@ -312,6 +343,14 @@ public class ModulithBridgeProperties {
 
         public void setShadowSampleRate(Double shadowSampleRate) {
             this.shadowSampleRate = shadowSampleRate;
+        }
+
+        public Double getRemotePercentage() {
+            return remotePercentage;
+        }
+
+        public void setRemotePercentage(Double remotePercentage) {
+            this.remotePercentage = remotePercentage;
         }
     }
 }

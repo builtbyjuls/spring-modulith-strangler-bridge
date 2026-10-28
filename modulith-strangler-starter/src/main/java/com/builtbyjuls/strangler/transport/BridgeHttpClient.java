@@ -16,6 +16,8 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
+import com.builtbyjuls.strangler.trace.BridgeTraceContext;
+import com.builtbyjuls.strangler.trace.BridgeTraceContextHolder;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -33,29 +35,41 @@ public class BridgeHttpClient implements AutoCloseable {
     private final ObjectMapper objectMapper;
     private final ExecutorService virtualThreadExecutor;
     private final String secretToken;
+    private final boolean propagateTraceContext;
 
     public BridgeHttpClient() {
-        this(RestClient.builder(), createDefaultObjectMapper(), (String) null);
+        this(RestClient.builder(), createDefaultObjectMapper(), (String) null, true);
     }
 
     public BridgeHttpClient(RestClient.Builder restClientBuilder, ObjectMapper objectMapper) {
-        this(restClientBuilder, objectMapper, (String) null);
+        this(restClientBuilder, objectMapper, (String) null, true);
     }
 
     public BridgeHttpClient(RestClient.Builder restClientBuilder, ObjectMapper objectMapper, ModulithBridgeProperties properties) {
-        this(restClientBuilder, objectMapper, properties != null ? properties.getSecretToken() : null);
+        this(restClientBuilder, objectMapper,
+                properties != null ? properties.getSecretToken() : null,
+                properties != null ? properties.isPropagateTraceContext() : true);
     }
 
     public BridgeHttpClient(RestClient.Builder restClientBuilder, ObjectMapper objectMapper, String secretToken) {
+        this(restClientBuilder, objectMapper, secretToken, true);
+    }
+
+    public BridgeHttpClient(RestClient.Builder restClientBuilder, ObjectMapper objectMapper, String secretToken, boolean propagateTraceContext) {
         RestClient.Builder builder = restClientBuilder != null ? restClientBuilder : RestClient.builder();
         this.objectMapper = objectMapper != null ? objectMapper : createDefaultObjectMapper();
         this.secretToken = secretToken;
+        this.propagateTraceContext = propagateTraceContext;
         this.restClient = builder.build();
         this.virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     public String getSecretToken() {
         return secretToken;
+    }
+
+    public boolean isPropagateTraceContext() {
+        return propagateTraceContext;
     }
 
     public Object invokeRemote(String url, BridgeInvocationRequest request, Type returnType) {
@@ -80,22 +94,41 @@ public class BridgeHttpClient implements AutoCloseable {
                 endpoint, request.moduleName(), request.methodName(), shadowMode);
 
         BridgeInvocationResponse response;
+        BridgeTraceContext traceContext = propagateTraceContext ? BridgeTraceContextHolder.captureForOutbound() : null;
         try {
             String requestJson = objectMapper.writeValueAsString(request);
             CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
-                RestClient.RequestBodySpec requestSpec = restClient.post()
-                        .uri(endpoint)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .accept(MediaType.APPLICATION_JSON);
-                if (StringUtils.hasText(secretToken)) {
-                    requestSpec.header(ModulithBridgeInboundController.SECRET_HEADER, secretToken);
+                try (BridgeTraceContextHolder.Scope ignored = traceContext != null
+                        ? BridgeTraceContextHolder.openScope(traceContext)
+                        : BridgeTraceContextHolder.Scope.NOOP) {
+                    RestClient.RequestBodySpec requestSpec = restClient.post()
+                            .uri(endpoint)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.APPLICATION_JSON);
+                    if (StringUtils.hasText(secretToken)) {
+                        requestSpec.header(ModulithBridgeInboundController.SECRET_HEADER, secretToken);
+                    }
+                    if (shadowMode) {
+                        requestSpec.header(ModulithBridgeInboundController.SHADOW_HEADER, "true");
+                    }
+                    if (traceContext != null) {
+                        if (StringUtils.hasText(traceContext.traceparent())) {
+                            requestSpec.header(BridgeTraceContextHolder.TRACEPARENT_HEADER, traceContext.traceparent());
+                        }
+                        if (StringUtils.hasText(traceContext.tracestate())) {
+                            requestSpec.header(BridgeTraceContextHolder.TRACESTATE_HEADER, traceContext.tracestate());
+                        }
+                        if (StringUtils.hasText(traceContext.baggage())) {
+                            requestSpec.header(BridgeTraceContextHolder.BAGGAGE_HEADER, traceContext.baggage());
+                        }
+                        if (StringUtils.hasText(traceContext.correlationId())) {
+                            requestSpec.header(BridgeTraceContextHolder.CORRELATION_ID_HEADER, traceContext.correlationId());
+                        }
+                    }
+                    return requestSpec.body(requestJson)
+                            .retrieve()
+                            .body(String.class);
                 }
-                if (shadowMode) {
-                    requestSpec.header(ModulithBridgeInboundController.SHADOW_HEADER, "true");
-                }
-                return requestSpec.body(requestJson)
-                        .retrieve()
-                        .body(String.class);
             }, virtualThreadExecutor);
 
             String responseJson;

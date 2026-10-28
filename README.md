@@ -7,7 +7,7 @@
 A reusable **Spring Boot 4.1 starter** (`modulith-strangler-starter`) that brings **zero-code microservice extraction**, **single-JAR runtime module slicing**, and **shadow parity verification** to **Spring Modulith** applications.
 
 * **Tech Stack**: **Java 21** (Virtual Threads), **Spring Boot 4.1.x**, **Spring Modulith 2.1.1**, **PostgreSQL 16** (Testcontainers), **Hibernate ORM 7.x**.
-* **Scope**: Enables modular monoliths to route `@NamedInterface` module calls across **`LOCAL`**, **`SHADOW`**, and **`REMOTE`** modes via `application.yml` without changing domain code.
+* **Scope**: Enables modular monoliths to route `@NamedInterface` module calls across **`LOCAL`**, **`SHADOW`**, **`CANARY`**, and **`REMOTE`** modes via `application.yml` without changing domain code.
 
 ---
 
@@ -23,7 +23,7 @@ A reusable **Spring Boot 4.1 starter** (`modulith-strangler-starter`) that bring
 1. **Single-JAR Runtime Slicing (`host-only`)**: Starts a worker JVM with `--modulith.bridge.host-only=metering` and strips all bean definitions from other modules (`settlement`, `contract`) before singleton creation.
 2. **Hibernate Entity Slicing (`ModuleSliceEntityPostProcessor`)**: Prunes non-hosted JPA entities from the Hibernate metamodel, preventing tables and schemas of unused modules from loading into the worker persistence unit.
 3. **Startup Contract Validation (`ModuleContractValidator`)**: Inspects `@NamedInterface` boundaries at startup and rejects leaked JPA entities or non-serializable streaming types.
-4. **Zero-Code Proxy Routing (`LOCAL` / `SHADOW` / `REMOTE`)**: Wraps `@NamedInterface` beans in a dynamic proxy that switches between in-JVM calls and remote HTTP calls via `application.yml`.
+4. **Zero-Code Proxy Routing (`LOCAL` / `SHADOW` / `CANARY` / `REMOTE`)**: Wraps `@NamedInterface` beans in a dynamic proxy that switches between in-JVM calls, shadow verification, canary traffic splitting, and remote HTTP calls via `application.yml`.
 5. **Shadow Parity Verification & Traffic Sampling**: Runs `LOCAL` as authority while calling `REMOTE` in parallel on a **Java 21 Virtual Thread**, comparing results with scale-normalized `BigDecimal` precision with configurable sampling rates (`modulith.bridge.shadow-sample-rate`).
 6. **Shadow Transaction Rollback (Dry-Run Writes)**: Enables safe shadow testing for write operations by sending `X-Modulith-Shadow: true`, executing the remote worker invocation in a rollback-only transaction after flushing constraints.
 7. **Zero-Restart Live Mode Switching**: Dynamically updates routing topology and sampling rates at runtime without restarting JVMs via `GET / POST /internal/modulith-bridge/routes`.
@@ -31,6 +31,8 @@ A reusable **Spring Boot 4.1 starter** (`modulith-strangler-starter`) that bring
 9. **Inbound Whitelisting & Secret Authentication**: Restricts worker RPC endpoints to `@NamedInterface` contracts and validates pre-shared `X-Modulith-Bridge-Secret` tokens (`modulith.bridge.secret-token`).
 10. **Chatty RPC Loop Detection (`BridgeCallBudgetGuard`)**: Tracks per-thread sliding-window invocation frequency for `@NamedInterface` methods, warning or halting execution (`modulith.bridge.fail-on-chatty-boundary=true`) to detect N+1 loops before extracting to remote HTTP.
 11. **Fast-Fail Circuit Breaker (`BridgeCircuitBreaker`)**: Trips `OPEN` after consecutive transport failures to fast-fail remote calls directly to `LOCAL` fallback in `0ms` without blocking on HTTP timeouts.
+12. **Progressive Canary Traffic Splitting (`BridgeMode.CANARY`)**: Gradually shifts authoritative traffic (`0.0% -> 100.0%`) to the remote worker using configurable `remote-percentage`, avoiding all-or-nothing cutover cliffs while maintaining circuit breaker and local fallback safety.
+13. **W3C Distributed Trace Context Propagation (`BridgeTraceContextHolder`)**: Propagates W3C trace headers (`traceparent`, `tracestate`, `baggage`, `X-Modulith-Correlation-Id`) across virtual threads and HTTP module hops, automatically binding context into SLF4J `MDC` on remote worker JVMs.
 
 ---
 
@@ -47,6 +49,10 @@ flowchart TD
     ShadowLocal --> Return
     Proxy -. "Virtual Thread (X-Modulith-Shadow: true)" .-> Worker["Extracted Worker JVM (host-only)"]
     Worker -.-> Verifier["ShadowParityVerifier (BigDecimal Scale Diff)"]
+
+    Proxy -- "CANARY (remote-percentage)" --> CanaryRouter{"Canary Evaluation"}
+    CanaryRouter -- "Sampled Remote" --> WorkerRemote
+    CanaryRouter -- "Sampled Local" --> Local
 
     Proxy -- "REMOTE" --> WorkerRemote["Extracted Worker JVM (HTTP POST)"]
     WorkerRemote -- "200 OK" --> Return
@@ -82,16 +88,18 @@ When running a module in **`SHADOW`** mode during strangler migration, the start
 
 ## Production Hardening Features
 
-The starter includes eight production-grade reliability, security, and migration capabilities:
+The starter includes ten production-grade reliability, security, and migration capabilities:
 
 1. **Hibernate Entity Slicing (`ModuleSliceEntityPostProcessor`)**: In `host-only` mode, intercepts `LocalContainerEntityManagerFactoryBean` to prune non-hosted JPA `@Entity` classes from `PersistenceUnitInfo`, preventing foreign tables from polluting the worker metamodel or database schema validations.
 2. **Startup Module Contract Validation (`ModuleContractValidator`)**: Inspects all `@NamedInterface` and `@ModulithBridgeTarget` contracts on startup (`modulith.bridge.validate-contracts=true`). Rejects method parameters or return types containing JPA `@Entity` types or non-serializable streams (`InputStream`, `OutputStream`, `Reader`, `Writer`).
 3. **Inbound Interface Whitelisting & Secret Auth (`X-Modulith-Bridge-Secret`)**: Enforces that only whitelisted `@NamedInterface` or `@ModulithBridgeTarget` interfaces are exposed via `/internal/modulith-bridge/invoke` (`HTTP 403 Forbidden` otherwise). Validates pre-shared tokens using constant-time `MessageDigest.isEqual` (`HTTP 401 Unauthorized` on mismatch).
 4. **Smart Error Classification (`BridgeBusinessException`)**: Differentiates between remote domain validation failures and transport failures. Domain errors are propagated directly to the caller, while transport and network errors trigger fallback to `LOCAL` when `fallbackToLocal=true`.
 5. **Shadow Transaction Rollback & Traffic Sampling**: Enables safe shadow verification for mutating write methods. Attaches `X-Modulith-Shadow: true` on outbound shadow requests. The remote worker executes the target method inside a rollback-only transaction (`PROPAGATION_REQUIRES_NEW`), flushes `EntityManager` constraints, returns the computed DTO, and rolls back all database mutations. Configurable traffic sampling (`modulith.bridge.shadow-sample-rate`, `0.0` to `1.0`) controls shadow volume globally and per-module.
-6. **Zero-Restart Live Mode Switching**: Exposes `GET` and `POST /internal/modulith-bridge/routes` (secured via `X-Modulith-Bridge-Secret`) to inspect and dynamically update routing modes (`LOCAL -> SHADOW -> REMOTE`), URLs, timeouts, fallback flags, and sample rates in-memory without JVM restarts.
+6. **Zero-Restart Live Mode Switching**: Exposes `GET` and `POST /internal/modulith-bridge/routes` (secured via `X-Modulith-Bridge-Secret`) to inspect and dynamically update routing modes (`LOCAL -> SHADOW -> CANARY -> REMOTE`), URLs, timeouts, fallback flags, sample rates, and canary percentages in-memory without JVM restarts.
 7. **Chatty RPC Loop Detection (`BridgeCallBudgetGuard`)**: Identifies synchronous distributed monolith anti-patterns where callers invoke a `@NamedInterface` method inside a tight `for` loop. Monitors per-thread sliding-window call frequency (`modulith.bridge.max-calls-per-window`, `modulith.bridge.call-window-ms`). Warns or throws `ChattyModuleBoundaryException` (`modulith.bridge.fail-on-chatty-boundary=true`), advising callers to refactor to batch methods or Spring Modulith `@Externalized` async events.
 8. **Fast-Fail Circuit Breaker (`BridgeCircuitBreaker`)**: Eliminates cascading timeout delays during worker outages. Tracks consecutive transport failures per module (`modulith.bridge.circuit-failure-threshold`). Trips to `OPEN` for `circuitResetTimeoutMs`, routing calls directly to `LOCAL` fallback in `0ms` without network overhead. Transitions to `HALF_OPEN` to permit a single probe request before recovering to `CLOSED`.
+9. **Progressive Canary Traffic Splitting (`BridgeMode.CANARY`)**: Eliminates the high-risk cutover cliff between `SHADOW` and `REMOTE` by shifting authoritative production traffic incrementally (`modulith.bridge.remote-percentage` or per-module `remote-percentage`, `0.0` to `100.0`). Every canary call retains full `BridgeCircuitBreaker` fast-fail protection and local fallback.
+10. **W3C Distributed Trace Context Propagation (`BridgeTraceContextHolder`)**: Preserves distributed observability across asynchronous virtual thread dispatch and HTTP transport. Binds W3C headers (`traceparent`, `tracestate`, `baggage`, `X-Modulith-Correlation-Id`) to and from SLF4J `MDC`, automatically generating a traceable correlation UUID when no upstream tracer is present.
 
 ---
 

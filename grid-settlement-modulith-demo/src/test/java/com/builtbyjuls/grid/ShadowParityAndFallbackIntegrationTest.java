@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -43,6 +44,7 @@ import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
 import com.builtbyjuls.strangler.report.DeploymentManifestGenerator;
 import com.builtbyjuls.strangler.report.StranglerReportExporter;
 import com.builtbyjuls.strangler.resilience.BridgeCircuitBreaker;
+import com.builtbyjuls.strangler.trace.BridgeTraceContextHolder;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.builtbyjuls.strangler.transport.BridgeInvocationRequest;
 import com.builtbyjuls.strangler.transport.BridgeInvocationResponse;
@@ -379,6 +381,42 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
         boolean existsInDb = persistedVolumes.stream()
                 .anyMatch(v -> testMeterCode.equals(v.meterCode()));
         assertThat(existsInDb).isFalse();
+    }
+
+    @Test
+    @DisplayName("Scenario D: Live CANARY mode routes 100% of calls remotely with W3C traceparent and baggage propagation")
+    void shouldRouteCanaryModeWithTracePropagationToLiveWorkerNode() {
+        ModulithBridgeProperties.ModuleRouteConfig meteringRoute = bridgeProperties.getModules().get("metering");
+        BridgeMode previousMode = meteringRoute.getMode();
+        Double previousPercentage = meteringRoute.getRemotePercentage();
+
+        try {
+            meteringRoute.setMode(BridgeMode.CANARY);
+            meteringRoute.setRemotePercentage(100.0);
+
+            String testTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+            String testTracestate = "congo=4";
+            String testBaggage = "userId=canary-tester,tenant=grid-corp";
+            String testCorrelationId = "canary-corr-999";
+
+            MDC.put(BridgeTraceContextHolder.MDC_TRACEPARENT, testTraceparent);
+            MDC.put(BridgeTraceContextHolder.MDC_TRACESTATE, testTracestate);
+            MDC.put(BridgeTraceContextHolder.MDC_BAGGAGE, testBaggage);
+            MDC.put(BridgeTraceContextHolder.MDC_CORRELATION_ID, testCorrelationId);
+
+            List<DailyMeterVolumeDto> volumes = meteringApi.aggregateDailyMeterVolumes(TRADING_DATE);
+
+            assertThat(volumes).isNotEmpty();
+            assertThat(volumes).hasSize(GridDataSeeder.DEFAULT_CONTRACT_COUNT);
+            for (DailyMeterVolumeDto volume : volumes) {
+                assertThat(volume.readingDate()).isEqualTo(TRADING_DATE);
+                assertThat(volume.totalActualMwh()).isGreaterThan(BigDecimal.ZERO);
+            }
+        } finally {
+            meteringRoute.setMode(previousMode);
+            meteringRoute.setRemotePercentage(previousPercentage);
+            BridgeTraceContextHolder.clear();
+        }
     }
 
     @Test

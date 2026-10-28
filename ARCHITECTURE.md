@@ -23,6 +23,7 @@ This project provides a reusable Spring Boot starter (**`modulith-strangler-star
    * **`LOCAL`**: Direct in-JVM method call with zero serialization overhead.
    * **`REMOTE`**: Routes method calls over HTTP/JSON via Spring `RestClient` to the extracted worker node, with optional automatic fallback to `LOCAL`.
    * **`SHADOW`**: Executes `LOCAL` as the authoritative response while invoking `REMOTE` in parallel on a Java 21 Virtual Thread to verify calculation parity before cutover.
+   * **`CANARY`**: Probabilistically routes authoritative calls between `LOCAL` and `REMOTE` based on configured `remotePercentage` (`0.0` to `100.0`), retaining full circuit breaker and fallback protection.
 
 ### 1.3 System Boundaries
 
@@ -53,6 +54,8 @@ spring-modulith-strangler-bridge/
 |   |-- src/main/java/.../proxy/            # ModulithBridgeBeanPostProcessor, ModulithBridgeInvocationHandler
 |   |-- src/main/java/.../transport/        # BridgeHttpClient, ModulithBridgeInboundController
 |   |-- src/main/java/.../parity/           # ShadowParityVerifier, ShadowParityResult
+|   |-- src/main/java/.../resilience/       # BridgeCallBudgetGuard, BridgeCircuitBreaker
+|   |-- src/main/java/.../trace/            # BridgeTraceContext, BridgeTraceContextHolder
 |   \-- src/main/java/.../report/           # StranglerReportExporter, DeploymentManifestGenerator
 \-- grid-settlement-modulith-demo/          # Wholesale Energy Settlement Modulith Demo App
     |-- src/main/java/.../contract/         # Module 1: Bilateral Contracts & Declarations (ContractApi)
@@ -144,6 +147,27 @@ Reporting is designed to be completely CI-platform agnostic, emitting native art
   * **`HALF_OPEN`**: After `modulith.bridge.circuit-reset-timeout-ms` (default `30,000ms`), the circuit permits a single probe request. Success resets failure counters and restores `CLOSED` state; failure immediately trips the circuit back to `OPEN`.
 * **Business Exception Exemption**: Legitimate domain exceptions (`BridgeBusinessException`) do not count toward transport failure thresholds, ensuring valid client validation errors never trip the circuit breaker.
 
+### 3.12 Progressive Canary Traffic Splitting (`BridgeMode.CANARY`)
+
+* **Gradual Cutover Control**: Cutting over from `SHADOW` (0% authority) to `REMOTE` (100% authority) presents a high-risk operational cliff. `BridgeMode.CANARY` shifts authoritative production traffic incrementally using `modulith.bridge.remote-percentage` (default `0.0`, range `0.0` to `100.0`), with per-module overrides (`modulith.bridge.modules.<module>.remote-percentage`).
+* **Probabilistic Routing with Edge Guarantees**:
+  * Values `<= 0.0` guarantee 100% in-process execution via `invokeLocal()` without invoking pseudo-random number generators or network code.
+  * Values `>= 100.0` route 100% of calls to `invokeRemote()`.
+  * Fractional values sample uniformly via `ThreadLocalRandom.current().nextDouble(100.0) < remotePercentage`.
+* **Integrated Resilience**: Every canary call routed to `invokeRemote()` passes through `BridgeCircuitBreaker` and obeys `fallbackToLocal`, ensuring that remote degradation or worker failures fail back to `LOCAL` without dropping requests.
+* **Dynamic Administration**: The effective canary percentage and mode can be shifted live (`POST /internal/modulith-bridge/routes/{moduleName}`) without JVM restarts.
+
+### 3.13 W3C Distributed Trace & Correlation Context Propagation (`BridgeTraceContextHolder`)
+
+* **Asynchronous Boundary Preservation**: In a microservice strangler migration, cross-module calls traverse Java 21 Virtual Threads and HTTP boundaries. Without explicit propagation, thread-local SLF4J `MDC` logs and W3C distributed trace identifiers are lost between the caller thread, the virtual thread executor, and the worker node.
+* **W3C Header Standard Support**: `BridgeTraceContextHolder` captures and emits standard distributed tracing headers:
+  * `traceparent`: W3C trace parent header (version-trace_id-parent_id-trace_flags).
+  * `tracestate`: Vendor-specific state list.
+  * `baggage`: OpenTelemetry / W3C user context key-value pairs.
+  * `X-Modulith-Correlation-Id`: Modulith correlation identifier.
+* **Zero-Tracer Auto-Generation**: If no upstream distributed tracer or MDC correlation ID is active, `BridgeTraceContextHolder.captureForOutbound()` generates a random UUID so every outbound bridge request carries a unique, traceable correlation ID across logs.
+* **Scoped Lifecycle Binding**: `BridgeTraceContextHolder.openScope(BridgeTraceContext)` sets explicit thread context and binds non-blank fields into SLF4J `MDC`. Inbound requests on `ModulithBridgeInboundController` automatically open a scope for the duration of bean execution and restore the caller's previous MDC state in an auto-closing `try-with-resources` block upon completion.
+
 ---
 
 ## 4. Reference Domain (`grid-settlement-modulith-demo`)
@@ -186,3 +210,5 @@ Wholesale electricity markets settle energy across **288 five-minute dispatch in
 | **Mode Switching** | **In-Memory Admin REST Controller (`ConcurrentHashMap`)** | External config servers (Spring Cloud Config, Consul) | **Why**: Provides zero-restart runtime cutover with zero external infrastructure dependencies.<br><br>**Trade-off**: Multi-replica deployments require triggering the admin endpoint across each instance or integrating with an ingress orchestrator. |
 | **Loop Detection** | **Per-Thread Sliding Window Guard** (`BridgeCallBudgetGuard`) | Centralized Redis token bucket or rate limiter | **Why**: Detects per-thread caller loop anti-patterns in-memory with zero network overhead or external infrastructure.<br><br>**Trade-off**: Scoped per thread rather than aggregating across multiple concurrent request threads. |
 | **Circuit Breaking** | **In-Memory Atomic State Machine** (`BridgeCircuitBreaker`) | Heavy external resilience frameworks (Resilience4j, Envoy) | **Why**: Zero external dependencies and instantaneous 0ms local fallback directly integrated into dynamic proxy invocation handler.<br><br>**Trade-off**: Circuit state is local to each JVM process rather than shared across clustered nodes. |
+| **Canary Routing** | **In-Proxy Statistical Splitting (`ThreadLocalRandom`)** | External API gateway / Service mesh traffic rules | **Why**: Eliminates infrastructure dependencies (Envoy/Istio/Kong) while guaranteeing consistent circuit breaker and fallback policies inside the application.<br><br>**Trade-off**: Traffic split is evaluated per application instance rather than by a centralized global gateway. |
+| **Trace Propagation** | **W3C Standard Headers + Scoped MDC Binding** | Heavy APM agent attachment (OpenTelemetry Java Agent) | **Why**: Works out-of-the-box in zero-dependency local and CI environments while remaining completely compatible with upstream W3C tracers.<br><br>**Trade-off**: Focuses on cross-bridge RPC context rather than full auto-instrumented byte-code tracing. |
