@@ -42,6 +42,7 @@ import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeInvocationHandler;
 import com.builtbyjuls.strangler.report.DeploymentManifestGenerator;
 import com.builtbyjuls.strangler.report.StranglerReportExporter;
+import com.builtbyjuls.strangler.resilience.BridgeCircuitBreaker;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.builtbyjuls.strangler.transport.BridgeInvocationRequest;
 import com.builtbyjuls.strangler.transport.BridgeInvocationResponse;
@@ -85,6 +86,9 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
 
     @Autowired
     private DeploymentManifestGenerator manifestGenerator;
+
+    @Autowired
+    private BridgeCircuitBreaker circuitBreaker;
 
     @DynamicPropertySource
     static void configureRemoteBridge(DynamicPropertyRegistry registry) {
@@ -270,6 +274,66 @@ class ShadowParityAndFallbackIntegrationTest extends PostgreSqlTestContainerBase
             config.setMode(originalMode);
             config.setUrl(originalUrl);
             config.setFallbackToLocal(originalFallback);
+        }
+    }
+
+    @Test
+    @DisplayName("Circuit breaker opens on unreachable worker and fast-fails subsequent calls to LOCAL without waiting for timeouts")
+    void shouldOpenCircuitBreakerOnUnreachableWorkerAndFastFailToLocal() {
+        circuitBreaker.reset();
+        parityRegistry.clear();
+
+        ModulithBridgeProperties.ModuleRouteConfig config = bridgeProperties.getModules().get("metering");
+        BridgeMode originalMode = config.getMode();
+        String originalUrl = config.getUrl();
+        long originalTimeout = config.getTimeoutMs();
+        boolean originalFallback = config.isFallbackToLocal();
+        int originalThreshold = bridgeProperties.getCircuitFailureThreshold();
+        long originalResetTimeout = bridgeProperties.getCircuitResetTimeoutMs();
+
+        try {
+            bridgeProperties.setCircuitFailureThreshold(2);
+            bridgeProperties.setCircuitResetTimeoutMs(30000L);
+            config.setMode(BridgeMode.REMOTE);
+            config.setUrl("http://localhost:59999"); // unreachable port
+            config.setTimeoutMs(1000L);
+            config.setFallbackToLocal(true);
+
+            // 1st failure: transport error, fallback to local, circuit remains CLOSED
+            List<DailyMeterVolumeDto> firstRun = meteringApi.aggregateDailyMeterVolumes(TRADING_DATE);
+            assertThat(firstRun).hasSize(GridDataSeeder.DEFAULT_CONTRACT_COUNT);
+            assertThat(circuitBreaker.getState("metering")).isEqualTo(BridgeCircuitBreaker.State.CLOSED);
+
+            // 2nd failure: reaches failure threshold (2), trips circuit to OPEN
+            List<DailyMeterVolumeDto> secondRun = meteringApi.aggregateDailyMeterVolumes(TRADING_DATE);
+            assertThat(secondRun).hasSize(GridDataSeeder.DEFAULT_CONTRACT_COUNT);
+            assertThat(circuitBreaker.getState("metering")).isEqualTo(BridgeCircuitBreaker.State.OPEN);
+
+            // 3rd call: Circuit breaker is OPEN -> fast-fails immediately to local in 0ms without waiting for timeout
+            long start = System.currentTimeMillis();
+            List<DailyMeterVolumeDto> fastFailRun = meteringApi.aggregateDailyMeterVolumes(TRADING_DATE);
+            long elapsed = System.currentTimeMillis() - start;
+
+            assertThat(fastFailRun).hasSize(GridDataSeeder.DEFAULT_CONTRACT_COUNT);
+            assertThat(circuitBreaker.getState("metering")).isEqualTo(BridgeCircuitBreaker.State.OPEN);
+            assertThat(elapsed).isLessThan(200L); // fast fallback to in-JVM execution without 1,000ms network timeout
+
+            List<ShadowParityResult> fallbacks = parityRegistry.getResults().stream()
+                    .filter(ShadowParityResult::fallbackTriggered)
+                    .toList();
+            assertThat(fallbacks).isNotEmpty();
+            ShadowParityResult latestFallback = fallbacks.get(fallbacks.size() - 1);
+            assertThat(latestFallback.diffSummary())
+                    .isEqualTo("Circuit breaker OPEN for module 'metering', fast-falling back to local");
+            assertThat(latestFallback.remoteDurationMs()).isEqualTo(0L);
+        } finally {
+            circuitBreaker.reset();
+            config.setMode(originalMode);
+            config.setUrl(originalUrl);
+            config.setTimeoutMs(originalTimeout);
+            config.setFallbackToLocal(originalFallback);
+            bridgeProperties.setCircuitFailureThreshold(originalThreshold);
+            bridgeProperties.setCircuitResetTimeoutMs(originalResetTimeout);
         }
     }
 

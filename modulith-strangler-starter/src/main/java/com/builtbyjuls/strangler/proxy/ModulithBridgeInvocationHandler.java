@@ -17,9 +17,12 @@ import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
 import com.builtbyjuls.strangler.parity.ShadowParityResult;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
+import com.builtbyjuls.strangler.resilience.BridgeCallBudgetGuard;
+import com.builtbyjuls.strangler.resilience.BridgeCircuitBreaker;
 import com.builtbyjuls.strangler.transport.BridgeBusinessException;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.builtbyjuls.strangler.transport.BridgeInvocationRequest;
+import com.builtbyjuls.strangler.transport.BridgeRemoteInvocationException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -39,6 +42,8 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
     private final ObjectMapper objectMapper;
     private final ShadowParityVerifier verifier;
     private final ShadowParityRegistry registry;
+    private final BridgeCallBudgetGuard callBudgetGuard;
+    private final BridgeCircuitBreaker circuitBreaker;
 
     public ModulithBridgeInvocationHandler(
             Object localTarget,
@@ -48,7 +53,7 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
             BridgeHttpClient httpClient,
             ObjectMapper objectMapper
     ) {
-        this(localTarget, moduleName, targetInterface, properties, httpClient, objectMapper, null, null);
+        this(localTarget, moduleName, targetInterface, properties, httpClient, objectMapper, null, null, null, null);
     }
 
     public ModulithBridgeInvocationHandler(
@@ -61,6 +66,21 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
             ShadowParityVerifier verifier,
             ShadowParityRegistry registry
     ) {
+        this(localTarget, moduleName, targetInterface, properties, httpClient, objectMapper, verifier, registry, null, null);
+    }
+
+    public ModulithBridgeInvocationHandler(
+            Object localTarget,
+            String moduleName,
+            Class<?> targetInterface,
+            ModulithBridgeProperties properties,
+            BridgeHttpClient httpClient,
+            ObjectMapper objectMapper,
+            ShadowParityVerifier verifier,
+            ShadowParityRegistry registry,
+            BridgeCallBudgetGuard callBudgetGuard,
+            BridgeCircuitBreaker circuitBreaker
+    ) {
         this.localTarget = localTarget;
         this.moduleName = Objects.requireNonNull(moduleName, "moduleName must not be null").toLowerCase();
         this.targetInterface = Objects.requireNonNull(targetInterface, "targetInterface must not be null");
@@ -69,6 +89,8 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
         this.objectMapper = objectMapper != null ? objectMapper : (httpClient != null ? httpClient.getObjectMapper() : new ObjectMapper());
         this.verifier = verifier != null ? verifier : new ShadowParityVerifier(this.objectMapper);
         this.registry = registry != null ? registry : new ShadowParityRegistry();
+        this.callBudgetGuard = callBudgetGuard != null ? callBudgetGuard : new BridgeCallBudgetGuard(this.properties);
+        this.circuitBreaker = circuitBreaker != null ? circuitBreaker : new BridgeCircuitBreaker(this.properties);
     }
 
     public Object getLocalTarget() {
@@ -91,6 +113,14 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
         return registry;
     }
 
+    public BridgeCallBudgetGuard getCallBudgetGuard() {
+        return callBudgetGuard;
+    }
+
+    public BridgeCircuitBreaker getCircuitBreaker() {
+        return circuitBreaker;
+    }
+
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         if (method.getDeclaringClass() == Object.class) {
@@ -99,6 +129,10 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
 
         if (!targetInterface.isAssignableFrom(method.getDeclaringClass())) {
             return invokeLocal(method, args);
+        }
+
+        if (!isHostOnly()) {
+            callBudgetGuard.checkAndRecord(moduleName, targetInterface.getName(), method.getName());
         }
 
         BridgeMode mode = resolveMode();
@@ -166,15 +200,43 @@ public class ModulithBridgeInvocationHandler implements InvocationHandler {
         long timeoutMs = cfg != null ? cfg.getTimeoutMs() : 5000L;
         boolean fallbackToLocal = cfg == null || cfg.isFallbackToLocal();
 
+        if (!circuitBreaker.allowExecution(moduleName)) {
+            if (fallbackToLocal && localTarget != null) {
+                log.warn("Circuit breaker is OPEN for module '{}', fast-falling back to local bean", moduleName);
+                long startLocal = System.currentTimeMillis();
+                Object localResult = invokeLocal(method, args);
+                long localDurationMs = System.currentTimeMillis() - startLocal;
+
+                if (registry != null) {
+                    registry.record(new ShadowParityResult(
+                            moduleName,
+                            targetInterface.getName(),
+                            method.getName(),
+                            false,
+                            localDurationMs,
+                            0L,
+                            "Circuit breaker OPEN for module '" + moduleName + "', fast-falling back to local",
+                            "Circuit breaker OPEN for module '" + moduleName + "'",
+                            true
+                    ));
+                }
+                return localResult;
+            }
+            throw new BridgeRemoteInvocationException("Circuit breaker is OPEN for module '" + moduleName + "'");
+        }
+
         BridgeInvocationRequest request = createRequest(method, args);
         Type returnType = method.getGenericReturnType();
 
         long startRemote = System.currentTimeMillis();
         try {
-            return httpClient.invokeRemote(url, request, returnType, timeoutMs);
+            Object remoteResult = httpClient.invokeRemote(url, request, returnType, timeoutMs);
+            circuitBreaker.recordSuccess(moduleName);
+            return remoteResult;
         } catch (BridgeBusinessException bbe) {
             throw bbe;
         } catch (Exception ex) {
+            circuitBreaker.recordFailure(moduleName);
             long remoteDurationMs = System.currentTimeMillis() - startRemote;
             if (fallbackToLocal && localTarget != null) {
                 log.warn("Remote call to module '{}' failed, falling back to local bean: {}",

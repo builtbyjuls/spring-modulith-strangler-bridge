@@ -29,6 +29,8 @@ A reusable **Spring Boot 4.1 starter** (`modulith-strangler-starter`) that bring
 7. **Zero-Restart Live Mode Switching**: Dynamically updates routing topology and sampling rates at runtime without restarting JVMs via `GET / POST /internal/modulith-bridge/routes`.
 8. **Resilient Fallback & Smart Error Classification**: Automatically falls back to the in-JVM implementation if the remote worker node times out during migration, while rethrowing legitimate domain exceptions directly to callers without fallback.
 9. **Inbound Whitelisting & Secret Authentication**: Restricts worker RPC endpoints to `@NamedInterface` contracts and validates pre-shared `X-Modulith-Bridge-Secret` tokens (`modulith.bridge.secret-token`).
+10. **Chatty RPC Loop Detection (`BridgeCallBudgetGuard`)**: Tracks per-thread sliding-window invocation frequency for `@NamedInterface` methods, warning or halting execution (`modulith.bridge.fail-on-chatty-boundary=true`) to detect N+1 loops before extracting to remote HTTP.
+11. **Fast-Fail Circuit Breaker (`BridgeCircuitBreaker`)**: Trips `OPEN` after consecutive transport failures to fast-fail remote calls directly to `LOCAL` fallback in `0ms` without blocking on HTTP timeouts.
 
 ---
 
@@ -80,7 +82,7 @@ When running a module in **`SHADOW`** mode during strangler migration, the start
 
 ## Production Hardening Features
 
-The starter includes six production-grade reliability, security, and migration capabilities:
+The starter includes eight production-grade reliability, security, and migration capabilities:
 
 1. **Hibernate Entity Slicing (`ModuleSliceEntityPostProcessor`)**: In `host-only` mode, intercepts `LocalContainerEntityManagerFactoryBean` to prune non-hosted JPA `@Entity` classes from `PersistenceUnitInfo`, preventing foreign tables from polluting the worker metamodel or database schema validations.
 2. **Startup Module Contract Validation (`ModuleContractValidator`)**: Inspects all `@NamedInterface` and `@ModulithBridgeTarget` contracts on startup (`modulith.bridge.validate-contracts=true`). Rejects method parameters or return types containing JPA `@Entity` types or non-serializable streams (`InputStream`, `OutputStream`, `Reader`, `Writer`).
@@ -88,6 +90,8 @@ The starter includes six production-grade reliability, security, and migration c
 4. **Smart Error Classification (`BridgeBusinessException`)**: Differentiates between remote domain validation failures and transport failures. Domain errors are propagated directly to the caller, while transport and network errors trigger fallback to `LOCAL` when `fallbackToLocal=true`.
 5. **Shadow Transaction Rollback & Traffic Sampling**: Enables safe shadow verification for mutating write methods. Attaches `X-Modulith-Shadow: true` on outbound shadow requests. The remote worker executes the target method inside a rollback-only transaction (`PROPAGATION_REQUIRES_NEW`), flushes `EntityManager` constraints, returns the computed DTO, and rolls back all database mutations. Configurable traffic sampling (`modulith.bridge.shadow-sample-rate`, `0.0` to `1.0`) controls shadow volume globally and per-module.
 6. **Zero-Restart Live Mode Switching**: Exposes `GET` and `POST /internal/modulith-bridge/routes` (secured via `X-Modulith-Bridge-Secret`) to inspect and dynamically update routing modes (`LOCAL -> SHADOW -> REMOTE`), URLs, timeouts, fallback flags, and sample rates in-memory without JVM restarts.
+7. **Chatty RPC Loop Detection (`BridgeCallBudgetGuard`)**: Identifies synchronous distributed monolith anti-patterns where callers invoke a `@NamedInterface` method inside a tight `for` loop. Monitors per-thread sliding-window call frequency (`modulith.bridge.max-calls-per-window`, `modulith.bridge.call-window-ms`). Warns or throws `ChattyModuleBoundaryException` (`modulith.bridge.fail-on-chatty-boundary=true`), advising callers to refactor to batch methods or Spring Modulith `@Externalized` async events.
+8. **Fast-Fail Circuit Breaker (`BridgeCircuitBreaker`)**: Eliminates cascading timeout delays during worker outages. Tracks consecutive transport failures per module (`modulith.bridge.circuit-failure-threshold`). Trips to `OPEN` for `circuitResetTimeoutMs`, routing calls directly to `LOCAL` fallback in `0ms` without network overhead. Transitions to `HALF_OPEN` to permit a single probe request before recovering to `CLOSED`.
 
 ---
 

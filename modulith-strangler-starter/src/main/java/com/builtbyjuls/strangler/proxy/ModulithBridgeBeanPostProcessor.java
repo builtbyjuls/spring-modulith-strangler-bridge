@@ -19,6 +19,8 @@ import org.springframework.util.StringUtils;
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
+import com.builtbyjuls.strangler.resilience.BridgeCallBudgetGuard;
+import com.builtbyjuls.strangler.resilience.BridgeCircuitBreaker;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +39,8 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
     private final ObjectProvider<ObjectMapper> objectMapperProvider;
     private final ObjectProvider<ShadowParityVerifier> verifierProvider;
     private final ObjectProvider<ShadowParityRegistry> registryProvider;
+    private final ObjectProvider<BridgeCallBudgetGuard> callBudgetGuardProvider;
+    private final ObjectProvider<BridgeCircuitBreaker> circuitBreakerProvider;
 
     private ApplicationContext applicationContext;
     private String resolvedBasePackage;
@@ -48,7 +52,7 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
             ObjectProvider<BridgeHttpClient> httpClientProvider,
             ObjectProvider<ObjectMapper> objectMapperProvider
     ) {
-        this(inspectorProvider, propertiesProvider, httpClientProvider, objectMapperProvider, null, null);
+        this(inspectorProvider, propertiesProvider, httpClientProvider, objectMapperProvider, null, null, null, null);
     }
 
     public ModulithBridgeBeanPostProcessor(
@@ -59,12 +63,27 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
             ObjectProvider<ShadowParityVerifier> verifierProvider,
             ObjectProvider<ShadowParityRegistry> registryProvider
     ) {
+        this(inspectorProvider, propertiesProvider, httpClientProvider, objectMapperProvider, verifierProvider, registryProvider, null, null);
+    }
+
+    public ModulithBridgeBeanPostProcessor(
+            ObjectProvider<ModuleLayoutInspector> inspectorProvider,
+            ObjectProvider<ModulithBridgeProperties> propertiesProvider,
+            ObjectProvider<BridgeHttpClient> httpClientProvider,
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            ObjectProvider<ShadowParityVerifier> verifierProvider,
+            ObjectProvider<ShadowParityRegistry> registryProvider,
+            ObjectProvider<BridgeCallBudgetGuard> callBudgetGuardProvider,
+            ObjectProvider<BridgeCircuitBreaker> circuitBreakerProvider
+    ) {
         this.inspectorProvider = inspectorProvider;
         this.propertiesProvider = propertiesProvider;
         this.httpClientProvider = httpClientProvider;
         this.objectMapperProvider = objectMapperProvider;
         this.verifierProvider = verifierProvider;
         this.registryProvider = registryProvider;
+        this.callBudgetGuardProvider = callBudgetGuardProvider;
+        this.circuitBreakerProvider = circuitBreakerProvider;
     }
 
     public ModulithBridgeBeanPostProcessor(
@@ -79,6 +98,8 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
                 new SingleObjectProvider<>(httpClient),
                 new SingleObjectProvider<>(objectMapper),
                 null,
+                null,
+                null,
                 null
         );
     }
@@ -91,13 +112,28 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
             ShadowParityVerifier verifier,
             ShadowParityRegistry registry
     ) {
+        this(inspector, properties, httpClient, objectMapper, verifier, registry, null, null);
+    }
+
+    public ModulithBridgeBeanPostProcessor(
+            ModuleLayoutInspector inspector,
+            ModulithBridgeProperties properties,
+            BridgeHttpClient httpClient,
+            ObjectMapper objectMapper,
+            ShadowParityVerifier verifier,
+            ShadowParityRegistry registry,
+            BridgeCallBudgetGuard callBudgetGuard,
+            BridgeCircuitBreaker circuitBreaker
+    ) {
         this(
                 new SingleObjectProvider<>(inspector),
                 new SingleObjectProvider<>(properties),
                 new SingleObjectProvider<>(httpClient),
                 new SingleObjectProvider<>(objectMapper),
                 new SingleObjectProvider<>(verifier),
-                new SingleObjectProvider<>(registry)
+                new SingleObjectProvider<>(registry),
+                new SingleObjectProvider<>(callBudgetGuard),
+                new SingleObjectProvider<>(circuitBreaker)
         );
     }
 
@@ -122,7 +158,9 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
                 || bean instanceof BridgeHttpClient
                 || bean instanceof ObjectMapper
                 || bean instanceof ShadowParityVerifier
-                || bean instanceof ShadowParityRegistry) {
+                || bean instanceof ShadowParityRegistry
+                || bean instanceof BridgeCallBudgetGuard
+                || bean instanceof BridgeCircuitBreaker) {
             return bean;
         }
 
@@ -160,6 +198,8 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
         ObjectMapper objectMapper = objectMapperProvider != null ? objectMapperProvider.getIfAvailable() : null;
         ShadowParityVerifier verifier = verifierProvider != null ? verifierProvider.getIfAvailable() : null;
         ShadowParityRegistry registry = registryProvider != null ? registryProvider.getIfAvailable() : null;
+        BridgeCallBudgetGuard callBudgetGuard = callBudgetGuardProvider != null ? callBudgetGuardProvider.getIfAvailable() : null;
+        BridgeCircuitBreaker circuitBreaker = circuitBreakerProvider != null ? circuitBreakerProvider.getIfAvailable() : null;
 
         ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
                 bean,
@@ -169,7 +209,9 @@ public class ModulithBridgeBeanPostProcessor implements BeanPostProcessor, Appli
                 httpClient,
                 objectMapper,
                 verifier,
-                registry
+                registry,
+                callBudgetGuard,
+                circuitBreaker
         );
 
         Class<?>[] allInterfaces = ClassUtils.getAllInterfacesForClass(bean.getClass());

@@ -129,6 +129,21 @@ Reporting is designed to be completely CI-platform agnostic, emitting native art
 * **Thread-Safe Instant Cutover**: Module configurations are maintained in a `ConcurrentHashMap` with `volatile` fields. Existing JDK dynamic proxies inspect the updated configuration on their next invocation, allowing instantaneous zero-downtime cutover (`LOCAL -> SHADOW -> REMOTE`) without restarting JVM containers.
 * **Administrative Authentication**: Requires `X-Modulith-Bridge-Secret` matching `modulith.bridge.secret-token` via constant-time comparison when authentication is enabled.
 
+### 3.10 Chatty RPC Loop Detection (`BridgeCallBudgetGuard`)
+
+* **N+1 RPC Anti-Pattern Detection**: Inside a modular monolith, executing `@NamedInterface` methods within loops (`for (var c : contracts) meteringApi.getVolume(c.id())`) takes sub-millisecond in-memory time, masking latency issues. Once extracted to `REMOTE`, this results in catastrophic sequential HTTP round-trips.
+* **Sliding-Window Call Budget**: `BridgeCallBudgetGuard` maintains per-thread invocation history within a sliding window (`modulith.bridge.call-window-ms`, default `250ms`). If calls to any `module#method` exceed `modulith.bridge.max-calls-per-window` (default `10`), the guard increments a violation counter.
+* **Early Defect Prevention**: When `modulith.bridge.fail-on-chatty-boundary=true`, the guard throws `ChattyModuleBoundaryException` directly to the caller, highlighting the exact module, interface, method, and call count while advising refactoring to batch operations (`Collection<ID>`) or Spring Modulith `@Externalized` async events.
+
+### 3.11 Fast-Fail Circuit Breaker (`BridgeCircuitBreaker`)
+
+* **Cascading Latency Elimination**: Without circuit breaking, when a remote worker node is unreachable, every single outbound invocation blocks for the full transport timeout (e.g., `5,000ms`) before falling back to `LOCAL`, quickly exhausting caller worker threads.
+* **Lock-Free State Machine**: `BridgeCircuitBreaker` manages module health across `CLOSED -> OPEN -> HALF_OPEN` states using atomic primitives:
+  * **`CLOSED`**: All invocations proceed to the remote endpoint.
+  * **`OPEN`**: Tripped when consecutive transport failures reach `modulith.bridge.circuit-failure-threshold` (default `3`). Calls bypass the network entirely, routing directly to `LOCAL` fallback in `0ms` (recording `"Circuit breaker OPEN"` in `ShadowParityRegistry`) or throwing `BridgeRemoteInvocationException` if fallback is disabled.
+  * **`HALF_OPEN`**: After `modulith.bridge.circuit-reset-timeout-ms` (default `30,000ms`), the circuit permits a single probe request. Success resets failure counters and restores `CLOSED` state; failure immediately trips the circuit back to `OPEN`.
+* **Business Exception Exemption**: Legitimate domain exceptions (`BridgeBusinessException`) do not count toward transport failure thresholds, ensuring valid client validation errors never trip the circuit breaker.
+
 ---
 
 ## 4. Reference Domain (`grid-settlement-modulith-demo`)
@@ -169,3 +184,5 @@ Wholesale electricity markets settle energy across **288 five-minute dispatch in
 | **Bridge Security** | **Interface Whitelisting & Pre-Shared Secret** | Open reflective dispatch | **Why**: Protects inbound worker endpoints from unauthorized callers and arbitrary bean invocation.<br><br>**Trade-off**: Shared secret must be distributed to communicating services via environment or secret manager. |
 | **Shadow Writes** | **Rollback-Only Transaction (`PROPAGATION_REQUIRES_NEW`)** | Restricting shadow mode to read-only APIs | **Why**: Enables real-world shadow parity verification for write operations by testing inserts/updates and flushing SQL constraints without persisting changes.<br><br>**Trade-off**: Requires target method to execute in an isolated transaction on the worker node. |
 | **Mode Switching** | **In-Memory Admin REST Controller (`ConcurrentHashMap`)** | External config servers (Spring Cloud Config, Consul) | **Why**: Provides zero-restart runtime cutover with zero external infrastructure dependencies.<br><br>**Trade-off**: Multi-replica deployments require triggering the admin endpoint across each instance or integrating with an ingress orchestrator. |
+| **Loop Detection** | **Per-Thread Sliding Window Guard** (`BridgeCallBudgetGuard`) | Centralized Redis token bucket or rate limiter | **Why**: Detects per-thread caller loop anti-patterns in-memory with zero network overhead or external infrastructure.<br><br>**Trade-off**: Scoped per thread rather than aggregating across multiple concurrent request threads. |
+| **Circuit Breaking** | **In-Memory Atomic State Machine** (`BridgeCircuitBreaker`) | Heavy external resilience frameworks (Resilience4j, Envoy) | **Why**: Zero external dependencies and instantaneous 0ms local fallback directly integrated into dynamic proxy invocation handler.<br><br>**Trade-off**: Circuit state is local to each JVM process rather than shared across clustered nodes. |

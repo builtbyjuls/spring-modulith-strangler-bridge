@@ -19,6 +19,8 @@ import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
 import com.builtbyjuls.strangler.proxy.ModulithBridgeBeanPostProcessor;
 import com.builtbyjuls.strangler.report.DeploymentManifestGenerator;
 import com.builtbyjuls.strangler.report.StranglerReportExporter;
+import com.builtbyjuls.strangler.resilience.BridgeCallBudgetGuard;
+import com.builtbyjuls.strangler.resilience.BridgeCircuitBreaker;
 import com.builtbyjuls.strangler.slice.ModuleLayoutInspector;
 import com.builtbyjuls.strangler.slice.ModuleSliceEntityPostProcessor;
 import com.builtbyjuls.strangler.slice.ModuleSliceRegistryPostProcessor;
@@ -140,6 +142,18 @@ public class ModulithBridgeAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean
+    public BridgeCallBudgetGuard bridgeCallBudgetGuard(ModulithBridgeProperties properties) {
+        return new BridgeCallBudgetGuard(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public BridgeCircuitBreaker bridgeCircuitBreaker(ModulithBridgeProperties properties) {
+        return new BridgeCircuitBreaker(properties);
+    }
+
+    @Bean
     @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
     @ConditionalOnMissingBean
     public static ModulithBridgeBeanPostProcessor modulithBridgeBeanPostProcessor(
@@ -148,7 +162,9 @@ public class ModulithBridgeAutoConfiguration {
             ObjectProvider<BridgeHttpClient> bridgeHttpClientProvider,
             ObjectProvider<ObjectMapper> objectMapperProvider,
             ObjectProvider<ShadowParityVerifier> shadowParityVerifierProvider,
-            ObjectProvider<ShadowParityRegistry> shadowParityRegistryProvider
+            ObjectProvider<ShadowParityRegistry> shadowParityRegistryProvider,
+            ObjectProvider<BridgeCallBudgetGuard> bridgeCallBudgetGuardProvider,
+            ObjectProvider<BridgeCircuitBreaker> bridgeCircuitBreakerProvider
     ) {
         return new ModulithBridgeBeanPostProcessor(
                 moduleLayoutInspectorProvider,
@@ -156,7 +172,9 @@ public class ModulithBridgeAutoConfiguration {
                 bridgeHttpClientProvider,
                 objectMapperProvider,
                 shadowParityVerifierProvider,
-                shadowParityRegistryProvider
+                shadowParityRegistryProvider,
+                bridgeCallBudgetGuardProvider,
+                bridgeCircuitBreakerProvider
         );
     }
 }

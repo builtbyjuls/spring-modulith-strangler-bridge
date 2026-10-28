@@ -11,6 +11,8 @@ import org.springframework.beans.factory.FactoryBean;
 import com.builtbyjuls.strangler.config.ModulithBridgeProperties;
 import com.builtbyjuls.strangler.parity.ShadowParityRegistry;
 import com.builtbyjuls.strangler.parity.ShadowParityVerifier;
+import com.builtbyjuls.strangler.resilience.BridgeCallBudgetGuard;
+import com.builtbyjuls.strangler.resilience.BridgeCircuitBreaker;
 import com.builtbyjuls.strangler.transport.BridgeHttpClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -75,6 +77,14 @@ public class RemoteBridgeProxyFactoryBean<T> implements FactoryBean<T>, BeanFact
                     ? beanFactory.getBeanProvider(ShadowParityRegistry.class).getIfAvailable()
                     : null;
 
+            BridgeCallBudgetGuard callBudgetGuard = beanFactory != null
+                    ? beanFactory.getBeanProvider(BridgeCallBudgetGuard.class).getIfAvailable()
+                    : null;
+
+            BridgeCircuitBreaker circuitBreaker = beanFactory != null
+                    ? beanFactory.getBeanProvider(BridgeCircuitBreaker.class).getIfAvailable()
+                    : null;
+
             ModulithBridgeInvocationHandler handler = new ModulithBridgeInvocationHandler(
                     null, // local target is null because bean was pruned
                     moduleName,
@@ -83,7 +93,9 @@ public class RemoteBridgeProxyFactoryBean<T> implements FactoryBean<T>, BeanFact
                     httpClient,
                     objectMapper,
                     verifier,
-                    registry
+                    registry,
+                    callBudgetGuard,
+                    circuitBreaker
             );
 
             ClassLoader classLoader = interfaceType.getClassLoader() != null

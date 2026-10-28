@@ -72,6 +72,33 @@ public class ModulithBridgeProperties {
     private double shadowSampleRate = 1.0;
 
     /**
+     * Maximum invocations permitted per thread within callWindowMs before triggering chatty loop detection.
+     * Values <= 0 disable chatty loop detection.
+     */
+    private int maxCallsPerWindow = 10;
+
+    /**
+     * Sliding window duration in milliseconds for chatty RPC loop detection.
+     */
+    private long callWindowMs = 250L;
+
+    /**
+     * Whether exceeding maxCallsPerWindow throws ChattyModuleBoundaryException instead of logging a warning.
+     */
+    private boolean failOnChattyBoundary = false;
+
+    /**
+     * Number of consecutive transport failures before tripping the circuit breaker to OPEN.
+     * Values <= 0 disable circuit breaking.
+     */
+    private int circuitFailureThreshold = 3;
+
+    /**
+     * Duration in milliseconds the circuit breaker remains OPEN before probing with HALF_OPEN.
+     */
+    private long circuitResetTimeoutMs = 30000L;
+
+    /**
      * Per-module routing configurations.
      */
     private Map<String, ModuleRouteConfig> modules = new ConcurrentHashMap<>();
@@ -170,6 +197,46 @@ public class ModulithBridgeProperties {
 
     public void setShadowSampleRate(double shadowSampleRate) {
         this.shadowSampleRate = shadowSampleRate;
+    }
+
+    public int getMaxCallsPerWindow() {
+        return maxCallsPerWindow;
+    }
+
+    public void setMaxCallsPerWindow(int maxCallsPerWindow) {
+        this.maxCallsPerWindow = maxCallsPerWindow;
+    }
+
+    public long getCallWindowMs() {
+        return callWindowMs;
+    }
+
+    public void setCallWindowMs(long callWindowMs) {
+        this.callWindowMs = callWindowMs;
+    }
+
+    public boolean isFailOnChattyBoundary() {
+        return failOnChattyBoundary;
+    }
+
+    public void setFailOnChattyBoundary(boolean failOnChattyBoundary) {
+        this.failOnChattyBoundary = failOnChattyBoundary;
+    }
+
+    public int getCircuitFailureThreshold() {
+        return circuitFailureThreshold;
+    }
+
+    public void setCircuitFailureThreshold(int circuitFailureThreshold) {
+        this.circuitFailureThreshold = circuitFailureThreshold;
+    }
+
+    public long getCircuitResetTimeoutMs() {
+        return circuitResetTimeoutMs;
+    }
+
+    public void setCircuitResetTimeoutMs(long circuitResetTimeoutMs) {
+        this.circuitResetTimeoutMs = circuitResetTimeoutMs;
     }
 
     public Map<String, ModuleRouteConfig> getModules() {
